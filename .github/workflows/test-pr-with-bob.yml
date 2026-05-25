@@ -53,6 +53,10 @@ permissions:
   issues: write
   pull-requests: write
 
+concurrency:
+  group: test-pr-with-bob-${{ github.event.workflow_run.head_repository.full_name }}-${{ github.event.workflow_run.head_branch }}
+  cancel-in-progress: true
+
 jobs:
   test-pr-with-bob:
     if: github.event.workflow_run.conclusion == 'success'
@@ -233,13 +237,11 @@ jobs:
 
           if grep -qE '^[AMDRC][[:space:]]+src/skillberry_store/ui/' "${ARTIFACT_DIR}/changed-files.txt" 2>/dev/null; then
             PROJECT_DIR="src/skillberry_store/ui"
-          elif [ -f "src/skillberry_store/ui/package.json" ]; then
-            PROJECT_DIR="src/skillberry_store/ui"
-          elif [ -f "ui/package.json" ]; then
+          elif grep -qE '^[AMDRC][[:space:]]+ui/' "${ARTIFACT_DIR}/changed-files.txt" 2>/dev/null && [ -f "ui/package.json" ]; then
             PROJECT_DIR="ui"
-          elif [ -f "frontend/package.json" ]; then
+          elif grep -qE '^[AMDRC][[:space:]]+frontend/' "${ARTIFACT_DIR}/changed-files.txt" 2>/dev/null && [ -f "frontend/package.json" ]; then
             PROJECT_DIR="frontend"
-          elif [ -f "package.json" ]; then
+          elif grep -q '.' "${ARTIFACT_DIR}/changed-files.txt" 2>/dev/null && [ -f "package.json" ] && [ ! -f "src/skillberry_store/ui/package.json" ] && [ ! -f "ui/package.json" ] && [ ! -f "frontend/package.json" ]; then
             PROJECT_DIR="."
           fi
 
@@ -642,6 +644,8 @@ jobs:
           export default defineConfig({
             ...(baseConfig as any),
             webServer: undefined,
+            retries: 0,
+            timeout: 30000,
             outputDir: path.join(artifactDir, 'playwright-output'),
             reporter: [
               ['list'],
@@ -655,6 +659,8 @@ jobs:
               trace: 'on',
               video: 'on',
               screenshot: 'on',
+              actionTimeout: 15000,
+              navigationTimeout: 20000,
             },
           });
           TS
