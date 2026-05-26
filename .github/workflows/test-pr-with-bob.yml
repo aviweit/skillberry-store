@@ -413,6 +413,14 @@ jobs:
 
             Task: generate high-quality tests for this pull request AND generate reviewer-facing proof that the PR works.
 
+            IMPORTANT — CI environment:
+            The full application stack is running in this CI job:
+            - Backend API: http://127.0.0.1:8000 (FastAPI — real code from this PR branch)
+            - UI: http://127.0.0.1:8002 (Vite dev server, proxies /api/* to the backend)
+            - Test data has been seeded: 2 skills and 2 snippets are present in the database.
+            Do NOT mock the backend with page.route() unless the PR specifically tests offline/error behavior.
+            Use the live backend for all API interactions in tests.
+
             Requirements:
             - Analyze the PR title, body, changed files, and diff.
             - Create focused tests that exercise the behavior changed by the PR.
@@ -422,10 +430,13 @@ jobs:
             - If the PR changes UI behavior, create or update Playwright tests with @playwright/test.
             - Use the configured Playwright MCP server in .mcp.json to inspect UI behavior where helpful.
             - For UI behavior, make the tests produce proof that a reviewer can inspect:
-              - screenshots for important before/after or final UI states,
+              - screenshots for important before/after or final UI states of the CHANGED feature,
               - Playwright trace/video where available,
               - explicit assertions for the changed behavior,
               - concise notes explaining what the screenshots/videos prove.
+            - Before taking a screenshot, always wait for specific UI elements to appear
+              (use page.waitForSelector or expect(locator).toBeVisible) — never use waitForTimeout alone.
+            - Screenshots must show the CHANGED feature, not generic pages unrelated to the diff.
             - Use page.screenshot(...) or test.info().outputPath(...) for important screenshots.
             - Keep tests deterministic and CI-friendly.
             - Avoid broad/flaky snapshots.
