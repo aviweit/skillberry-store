@@ -221,6 +221,12 @@ export function VNFSServersPage() {
         filtered = filtered.filter(s =>
           s.name.toLowerCase().includes(lower) || s.description?.toLowerCase().includes(lower)
         );
+      } else if (searchMode === 'uuid') {
+        // UUID search: filter by matching UUID (partial match)
+        const lower = searchTerm.toLowerCase();
+        filtered = filtered.filter(s =>
+          s.uuid?.toLowerCase().includes(lower)
+        );
       }
     }
     if (filtered && selectedTags.length > 0) {
@@ -349,24 +355,24 @@ export function VNFSServersPage() {
               {filteredServers.map((server, index) => (
                 <Tr key={server.uuid}>
                   <Td select={{ rowIndex: index, onSelect: (_e, isSelected) => handleSelectServer(server.name, isSelected), isSelected: selectedServers.includes(server.name) }} />
-                  <Td dataLabel="Name" onClick={() => navigate(`/vnfs-servers/${server.name}`)} style={{ cursor: 'pointer' }}>{server.name}</Td>
-                  <Td dataLabel="Description" onClick={() => navigate(`/vnfs-servers/${server.name}`)} style={{ cursor: 'pointer' }}>{server.description || 'No description'}</Td>
-                  <Td dataLabel="State" onClick={() => navigate(`/vnfs-servers/${server.name}`)} style={{ cursor: 'pointer' }}>{server.state || '-'}</Td>
-                  <Td dataLabel="Tags" onClick={() => navigate(`/vnfs-servers/${server.name}`)} style={{ cursor: 'pointer' }}>
+                  <Td dataLabel="Name" onClick={() => navigate(`/vnfs-servers/${server.uuid}`)} style={{ cursor: 'pointer' }}>{server.name}</Td>
+                  <Td dataLabel="Description" onClick={() => navigate(`/vnfs-servers/${server.uuid}`)} style={{ cursor: 'pointer' }}>{server.description || 'No description'}</Td>
+                  <Td dataLabel="State" onClick={() => navigate(`/vnfs-servers/${server.uuid}`)} style={{ cursor: 'pointer' }}>{server.state || '-'}</Td>
+                  <Td dataLabel="Tags" onClick={() => navigate(`/vnfs-servers/${server.uuid}`)} style={{ cursor: 'pointer' }}>
                     {server.tags && server.tags.length > 0 ? (
                       <div style={{ display: 'flex', gap: '0.25rem', flexWrap: 'wrap' }}>
                         {server.tags.map(tag => <Label key={tag} color={getTagColor(tag)} isCompact>{tag}</Label>)}
                       </div>
                     ) : '-'}
                   </Td>
-                  <Td dataLabel="Port" onClick={() => navigate(`/vnfs-servers/${server.name}`)} style={{ cursor: 'pointer' }}>{server.port || '-'}</Td>
-                  <Td dataLabel="Protocol" onClick={() => navigate(`/vnfs-servers/${server.name}`)} style={{ cursor: 'pointer' }}>
+                  <Td dataLabel="Port" onClick={() => navigate(`/vnfs-servers/${server.uuid}`)} style={{ cursor: 'pointer' }}>{server.port || '-'}</Td>
+                  <Td dataLabel="Protocol" onClick={() => navigate(`/vnfs-servers/${server.uuid}`)} style={{ cursor: 'pointer' }}>
                     <Label color={server.protocol === 'nfs' ? 'blue' : 'cyan'} isCompact>{server.protocol || 'webdav'}</Label>
                   </Td>
-                  <Td dataLabel="Status" onClick={() => navigate(`/vnfs-servers/${server.name}`)} style={{ cursor: 'pointer' }}>
+                  <Td dataLabel="Status" onClick={() => navigate(`/vnfs-servers/${server.uuid}`)} style={{ cursor: 'pointer' }}>
                     {server.running ? <Label color="green" isCompact>Running</Label> : <Label color="red" isCompact>Stopped</Label>}
                   </Td>
-                  <Td dataLabel="Version" onClick={() => navigate(`/vnfs-servers/${server.name}`)} style={{ cursor: 'pointer' }}>{server.version || '-'}</Td>
+                  <Td dataLabel="Version" onClick={() => navigate(`/vnfs-servers/${server.uuid}`)} style={{ cursor: 'pointer' }}>{server.version || '-'}</Td>
                 </Tr>
               ))}
             </Tbody>

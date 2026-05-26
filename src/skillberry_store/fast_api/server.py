@@ -20,8 +20,8 @@ from skillberry_store.fast_api.admin_api import register_admin_api
 from skillberry_store.fast_api.vmcp_api import register_vmcp_api
 from skillberry_store.fast_api.vnfs_api import register_vnfs_api
 from skillberry_store.modules.description import Description
-from skillberry_store.vdbs.identify_vdb import identify_vector_db
 from skillberry_store.modules.file_handler import FileHandler
+from skillberry_store.vdbs.identify_vdb import identify_vector_db
 from skillberry_store.tools.configure import (
     get_files_directory_path,
     get_tools_descriptions_directory,
@@ -77,6 +77,12 @@ class SBS(FastAPI):
         configure_logging(logging._nameToLevel[self.settings.log_level])
         self.logger = logging.getLogger(__name__)
         logger.info(f"SBSettings sbs_vdb = {self.settings.sbs_vdb}")
+
+        # Initialize object handlers (singleton pattern)
+        from skillberry_store.modules.object_handler import initialize_object_handlers
+
+        initialize_object_handlers()
+        logger.info("Object handlers initialized")
 
         # Store description instances in app state for access by admin API
         self.state.tools_descriptions = tools_descriptions_api(self.settings.sbs_vdb)
