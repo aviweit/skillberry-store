@@ -1,5 +1,5 @@
 """
-Skillberry Plugin Evaluator - LLM-based quality/performance evaluation plugin.
+Skillberry Plugin Security - LLM-based security evaluation plugin.
 Uses llm-switchboard for LLM integration.
 """
 
@@ -13,16 +13,16 @@ from skillberry_store.plugins.base import PluginBase, PluginMetadata, PluginType
 logger = logging.getLogger(__name__)
 
 
-class SkillberryPluginEvaluator(PluginBase):
-    """Plugin for evaluating skills, tools, and snippets using LLM."""
+class SkillberryPluginSecurity(PluginBase):
+    """Plugin for evaluating skills, tools, and snippets for security posture using LLM."""
 
     def __init__(self):
         super().__init__()
 
         self._metadata = PluginMetadata(
-            name="Content Evaluator",
+            name="Security Evaluator",
             version="0.1.0",
-            description="Evaluate content quality and performance using LLM",
+            description="Evaluate content security posture using LLM",
             plugin_type=PluginType.EVALUATOR,
         )
 
@@ -53,7 +53,7 @@ class SkillberryPluginEvaluator(PluginBase):
         self._register_event_handlers()
 
     def _register_event_handlers(self) -> None:
-        """Register on_content_added handlers for automatic evaluation on object creation."""
+        """Register on_content_added handlers for automatic security evaluation on object creation."""
         from skillberry_store.plugins.events import _event_handlers
 
         for content_type in ("tool", "skill", "snippet"):
@@ -61,15 +61,13 @@ class SkillberryPluginEvaluator(PluginBase):
                 if not self.is_enabled() or self._store_api is None:
                     return
                 try:
-                    await self.evaluate_object(uuid, ct)
+                    await self.evaluate_security(uuid, ct)
                 except Exception as e:
                     logger.error(
-                        f"Auto-evaluation failed for {ct} {uuid}: {e}", exc_info=True
+                        f"Auto-security-evaluation failed for {ct} {uuid}: {e}", exc_info=True
                     )
                 # For skills, also evaluate referenced tools and snippets.
-                # Import flows (e.g. import-anthropic-skill) write tools/snippets
-                # directly to the handler without emitting per-object events, so
-                # those objects would otherwise never be evaluated.
+                # Import flows write tools/snippets directly without emitting per-object events.
                 if ct == "skill":
                     try:
                         skill_obj = self.store.get_skill(uuid)
@@ -78,18 +76,18 @@ class SkillberryPluginEvaluator(PluginBase):
                     if skill_obj:
                         for tool_uuid in skill_obj.get("tool_uuids") or []:
                             try:
-                                await self.evaluate_object(tool_uuid, "tool")
+                                await self.evaluate_security(tool_uuid, "tool")
                             except Exception as e:
                                 logger.error(
-                                    f"Auto-evaluation failed for tool {tool_uuid}: {e}",
+                                    f"Auto-security-evaluation failed for tool {tool_uuid}: {e}",
                                     exc_info=True,
                                 )
                         for snippet_uuid in skill_obj.get("snippet_uuids") or []:
                             try:
-                                await self.evaluate_object(snippet_uuid, "snippet")
+                                await self.evaluate_security(snippet_uuid, "snippet")
                             except Exception as e:
                                 logger.error(
-                                    f"Auto-evaluation failed for snippet {snippet_uuid}: {e}",
+                                    f"Auto-security-evaluation failed for snippet {snippet_uuid}: {e}",
                                     exc_info=True,
                                 )
 
@@ -108,8 +106,11 @@ class SkillberryPluginEvaluator(PluginBase):
     def is_enabled(self) -> bool:
         return self.llm_client is not None
 
+    def _strip_score_tags(self, tags: List[str]) -> List[str]:
+        return [t for t in tags if not t.startswith("security-score:")]
+
     def _build_context(self, obj: Dict[str, Any], content_type: str) -> str:
-        """Build rich context string for the LLM evaluation prompt."""
+        """Build rich context string for the LLM security evaluation prompt."""
         lines = [
             f"Name: {obj.get('name', 'N/A')}",
             f"Description: {obj.get('description', 'N/A')}",
@@ -173,38 +174,27 @@ class SkillberryPluginEvaluator(PluginBase):
 
         return "\n".join(lines)
 
-    def _strip_score_tags(self, tags: List[str]) -> List[str]:
-        """Remove evaluator score tags so re-evaluation is a clean overwrite."""
-        score_prefixes = ("quality-score:", "performance-score:")
-        return [t for t in tags if not any(t.startswith(p) for p in score_prefixes)]
-
-    async def _write_evaluation_to_store(
+    async def _write_security_to_store(
         self,
         uuid: str,
         content_type: str,
         obj: Dict[str, Any],
         evaluation: Dict[str, Any],
     ) -> None:
-        """Write score tags and textual evaluations back to the store object."""
-        score_tags = [
-            f"quality-score:{evaluation['quality_score']}",
-            f"performance-score:{evaluation['performance_score']}",
-        ]
+        """Write security score tag and evaluation text back to the store object.
 
+        Merges into extra["evaluation"]["security"] without wiping quality/performance keys.
+        """
         existing_tags = self._strip_score_tags(obj.get("tags") or [])
-        obj["tags"] = existing_tags + score_tags
+        obj["tags"] = existing_tags + [f"security-score:{evaluation['security_score']}"]
 
         if not isinstance(obj.get("extra"), dict):
             obj["extra"] = {}
-        obj["extra"]["evaluation"] = {
-            "quality": {
-                "score": evaluation["quality_score"],
-                "evaluation": evaluation["quality_evaluation"],
-            },
-            "performance": {
-                "score": evaluation["performance_score"],
-                "evaluation": evaluation["performance_evaluation"],
-            },
+        if not isinstance(obj["extra"].get("evaluation"), dict):
+            obj["extra"]["evaluation"] = {}
+        obj["extra"]["evaluation"]["security"] = {
+            "score": evaluation["security_score"],
+            "evaluation": evaluation["security_evaluation"],
         }
 
         if content_type == "tool":
@@ -214,21 +204,21 @@ class SkillberryPluginEvaluator(PluginBase):
         elif content_type == "snippet":
             self.store.snippets.write_dict(uuid, obj)
 
-    async def evaluate_object(self, uuid: str, content_type: str) -> Dict[str, Any]:
+    async def evaluate_security(self, uuid: str, content_type: str) -> Dict[str, Any]:
         """
-        Evaluate a store object on quality and performance.
+        Evaluate a store object's security posture.
 
         Fetches the full object from the store, sends it to the LLM, then
-        stores scores as tags (quality-score:N etc.) and textual evaluations
-        in extra["evaluation"].
+        stores the score as a tag (security-score:N) and the evaluation text
+        in extra["evaluation"]["security"]. Preserves any existing quality/
+        performance evaluation keys.
 
         Args:
             uuid: UUID of the object to evaluate
             content_type: "tool", "skill", or "snippet"
 
         Returns:
-            Dict with quality_score, performance_score (int 1-10)
-            and quality_evaluation, performance_evaluation (str)
+            Dict with security_score (int 1-10) and security_evaluation (str)
         """
         if not self.llm_client:
             raise RuntimeError("LLM client not initialized")
@@ -247,23 +237,21 @@ class SkillberryPluginEvaluator(PluginBase):
         if not obj:
             raise ValueError(f"{content_type.capitalize()} {uuid} not found in store")
 
-        logger.info(f"Evaluating {content_type} {uuid}: {obj.get('name', 'unnamed')}")
+        logger.info(f"Evaluating security of {content_type} {uuid}: {obj.get('name', 'unnamed')}")
 
         context = self._build_context(obj, content_type)
 
-        prompt = f"""You are evaluating a {content_type} from a skills store.
+        prompt = f"""You are evaluating a {content_type} from a skills store for security posture.
 
 {context}
 
-Evaluate this {content_type} on two dimensions and return a JSON object with exactly these four fields:
-- quality_score: integer 1-10 (clarity, structure, completeness, best practices)
-- quality_evaluation: string (one paragraph)
-- performance_score: integer 1-10 (efficiency, resource usage, scalability)
-- performance_evaluation: string (one paragraph)
+Evaluate this {content_type} on security and return a JSON object with exactly these two fields:
+- security_score: integer 1-10 where 1-3 = critical issues (injection flaws, exposed secrets, no input validation), 4-6 = moderate risks (weak error handling, risky dependencies, missing auth checks), 7-9 = minor issues (best-practice gaps, overly permissive patterns), 10 = no identified issues
+- security_evaluation: string (one paragraph explicitly naming each specific vulnerability or concern found, or "No security issues identified." if the score is 10)
 
 Return ONLY the JSON object, no other text."""
 
-        logger.debug(f"Calling LLM for {content_type} {uuid}")
+        logger.debug(f"Calling LLM for security evaluation of {content_type} {uuid}")
         response = await self.llm_client.generate_async(prompt=prompt)
         logger.info(f"Received LLM response ({len(response)} chars)")
 
@@ -274,26 +262,20 @@ Return ONLY the JSON object, no other text."""
                 raise ValueError("No JSON object found in LLM response")
             evaluation = json.loads(response[start:end])
 
-            required_fields = [
-                "quality_score", "quality_evaluation",
-                "performance_score", "performance_evaluation",
-            ]
-            for field in required_fields:
+            for field in ("security_score", "security_evaluation"):
                 if field not in evaluation:
                     raise ValueError(f"Missing field in LLM response: {field}")
 
-            for score_field in ("quality_score", "performance_score"):
-                evaluation[score_field] = int(evaluation[score_field])
+            evaluation["security_score"] = int(evaluation["security_score"])
 
         except Exception as e:
-            logger.warning(f"Failed to parse LLM evaluation response: {e}")
+            logger.warning(f"Failed to parse LLM security evaluation response: {e}")
             raise RuntimeError(f"Failed to parse LLM response: {str(e)}")
 
-        await self._write_evaluation_to_store(uuid, content_type, obj, evaluation)
+        await self._write_security_to_store(uuid, content_type, obj, evaluation)
         logger.info(
-            f"Evaluation stored for {content_type} {uuid}: "
-            f"quality={evaluation['quality_score']}, "
-            f"performance={evaluation['performance_score']}"
+            f"Security evaluation stored for {content_type} {uuid}: "
+            f"security={evaluation['security_score']}"
         )
 
         return evaluation
@@ -311,7 +293,7 @@ Return ONLY the JSON object, no other text."""
 
         @router.post("/evaluate")
         async def evaluate_endpoint(request: EvaluateRequest):
-            """Evaluate a store object and store quality/performance scores."""
+            """Evaluate a store object and store the security score."""
             if not self.is_enabled():
                 raise HTTPException(status_code=503, detail=self._status_message)
 
@@ -322,7 +304,7 @@ Return ONLY the JSON object, no other text."""
                 )
 
             try:
-                result = await self.evaluate_object(
+                result = await self.evaluate_security(
                     uuid=request.uuid,
                     content_type=request.content_type,
                 )
@@ -331,7 +313,7 @@ Return ONLY the JSON object, no other text."""
                 raise HTTPException(status_code=404, detail=str(e))
             except Exception as e:
                 logger.error(
-                    f"Failed to evaluate {request.content_type} {request.uuid}: {e}",
+                    f"Failed to evaluate security of {request.content_type} {request.uuid}: {e}",
                     exc_info=True,
                 )
                 raise HTTPException(status_code=500, detail=str(e))
@@ -343,12 +325,12 @@ Return ONLY the JSON object, no other text."""
 
     def get_ui_config(self) -> Optional[Dict[str, Any]]:
         return {
-            "icon": "CheckCircleIcon",
-            "color": "#28A745",
+            "icon": "ShieldAltIcon",
+            "color": "#E74C3C",
             "actions": [
                 {
-                    "label": "Evaluate",
-                    "endpoint": "/api/plugins/evaluator/evaluate",
+                    "label": "Evaluate Security",
+                    "endpoint": "/api/plugins/security/evaluate",
                     "method": "POST",
                     "params_schema": {
                         "type": "object",
@@ -368,5 +350,3 @@ Return ONLY the JSON object, no other text."""
                 }
             ],
         }
-
-# Made with Bob
