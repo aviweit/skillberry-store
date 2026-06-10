@@ -75,11 +75,18 @@ class SkillberryPluginMcpImporter(PluginBase):
         raw = "_".join(parts)
         return "".join(c if c.isalnum() or c == "_" else "_" for c in raw)
 
+    @staticmethod
+    def _hostname_from_url(mcp_url: str) -> str:
+        """Extract the hostname from a MCP URL, e.g. 'localhost', 'api.acme.com'."""
+        from urllib.parse import urlparse
+        return urlparse(mcp_url).hostname or "mcp"
+
     async def _import_tools(
         self,
         mcp_url: str,
         create_skill: bool = True,
         skill_name: Optional[str] = None,
+        tags: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
         """
         Connect to the MCP server at mcp_url, list all tools, create each in the store.
@@ -98,6 +105,16 @@ class SkillberryPluginMcpImporter(PluginBase):
 
         imported: List[Dict[str, Any]] = []
         failed: List[Dict[str, Any]] = []
+
+        hostname = self._hostname_from_url(mcp_url)
+        resolved_skill_name = skill_name or self._skill_name_from_url(mcp_url)
+
+        tool_tags: List[str] = ["mcp", hostname]
+        if create_skill:
+            tool_tags.append(f"skill:{resolved_skill_name}")
+        for tag in (tags or []):
+            if tag and tag not in tool_tags:
+                tool_tags.append(tag)
 
         for tool in tools:
             input_schema = tool.inputSchema or {}
@@ -124,6 +141,7 @@ class SkillberryPluginMcpImporter(PluginBase):
                 },
                 "params": params,
                 "programming_language": "python",
+                "tags": tool_tags,
             }
             stub = mcp_content(vars(tool))
             try:
@@ -139,19 +157,23 @@ class SkillberryPluginMcpImporter(PluginBase):
 
         skill: Optional[Dict[str, Any]] = None
         if create_skill and imported:
-            name = skill_name or self._skill_name_from_url(mcp_url)
             tool_uuids = [t["uuid"] for t in imported]
+            skill_tags: List[str] = ["mcp", "imported", hostname]
+            for tag in (tags or []):
+                if tag and tag not in skill_tags:
+                    skill_tags.append(tag)
             try:
                 skill_result = self.store.create_skill(
                     {
-                        "name": name,
+                        "name": resolved_skill_name,
                         "description": f"Tools imported from {mcp_url}",
                         "tool_uuids": tool_uuids,
+                        "tags": skill_tags,
                     }
                 )
                 skill = {"name": skill_result["name"], "uuid": skill_result["uuid"]}
             except Exception as exc:
-                logger.warning(f"Failed to create skill '{name}': {exc}")
+                logger.warning(f"Failed to create skill '{resolved_skill_name}': {exc}")
 
         return {
             "success": len(failed) == 0 and len(imported) > 0,
@@ -171,6 +193,7 @@ class SkillberryPluginMcpImporter(PluginBase):
             mcp_url: str
             create_skill: bool = True
             skill_name: Optional[str] = None
+            tags: Optional[List[str]] = None
 
         @router.post("/import-tools")
         async def import_tools(request: ImportRequest):
@@ -188,6 +211,7 @@ class SkillberryPluginMcpImporter(PluginBase):
                     url,
                     create_skill=request.create_skill,
                     skill_name=request.skill_name,
+                    tags=request.tags,
                 )
             except Exception as exc:
                 logger.error(
@@ -225,6 +249,11 @@ class SkillberryPluginMcpImporter(PluginBase):
                             "skill_name": {
                                 "type": "string",
                                 "description": "Name for the auto-created skill (default: derived from MCP URL)",
+                            },
+                            "tags": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "description": "Optional extra tags to add to imported tools and skill",
                             },
                         },
                         "required": ["mcp_url"],

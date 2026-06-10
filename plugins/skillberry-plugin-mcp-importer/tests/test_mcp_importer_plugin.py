@@ -5,6 +5,21 @@ from skillberry_plugin_mcp_importer.plugin import SkillberryPluginMcpImporter
 from skillberry_store.plugins.base import PluginType
 
 
+# --- _hostname_from_url ---
+
+def test_hostname_from_url_standard():
+    assert SkillberryPluginMcpImporter._hostname_from_url("http://localhost:3001/sse") == "localhost"
+
+def test_hostname_from_url_no_port():
+    assert SkillberryPluginMcpImporter._hostname_from_url("http://localhost/sse") == "localhost"
+
+def test_hostname_from_url_domain():
+    assert SkillberryPluginMcpImporter._hostname_from_url("https://api.acme.com/mcp/sse") == "api.acme.com"
+
+def test_hostname_from_url_malformed():
+    assert SkillberryPluginMcpImporter._hostname_from_url("not-a-url") == "mcp"
+
+
 def test_plugin_metadata():
     plugin = SkillberryPluginMcpImporter()
     meta = plugin.metadata
@@ -117,6 +132,123 @@ def _patch_mcp(tools):
         patch("skillberry_plugin_mcp_importer.plugin.ClientSession", mock_client_session)
     )
     return stack
+
+
+# --- tool tag generation ---
+
+def test_tool_tags_include_mcp_and_hostname():
+    tools = [_MockTool("tool_a")]
+    client, _, mock_store = _make_client(tools=tools)
+    with _patch_mcp(tools):
+        resp = client.post(
+            "/plugins/mcp-importer/import-tools",
+            json={"mcp_url": "http://mock-mcp:9500/sse", "create_skill": False},
+        )
+    assert resp.status_code == 200
+    data_arg = mock_store.create_tool.call_args.args[0]
+    assert "mcp" in data_arg["tags"]
+    assert "mock-mcp" in data_arg["tags"]
+
+
+def test_tool_tags_include_skill_reference_when_skill_created():
+    tools = [_MockTool("tool_b")]
+    client, _, mock_store = _make_client(tools=tools)
+    mock_store.create_skill.return_value = {"uuid": "s-uuid", "name": "mock-mcp_9500_sse"}
+    with _patch_mcp(tools):
+        resp = client.post(
+            "/plugins/mcp-importer/import-tools",
+            json={"mcp_url": "http://mock-mcp:9500/sse", "create_skill": True},
+        )
+    assert resp.status_code == 200
+    data_arg = mock_store.create_tool.call_args.args[0]
+    assert "skill:mock_mcp_9500_sse" in data_arg["tags"]
+
+
+def test_tool_tags_no_skill_reference_when_skill_not_created():
+    tools = [_MockTool("tool_c")]
+    client, _, mock_store = _make_client(tools=tools)
+    with _patch_mcp(tools):
+        resp = client.post(
+            "/plugins/mcp-importer/import-tools",
+            json={"mcp_url": "http://mock-mcp:9500/sse", "create_skill": False},
+        )
+    assert resp.status_code == 200
+    data_arg = mock_store.create_tool.call_args.args[0]
+    assert not any(t.startswith("skill:") for t in data_arg["tags"])
+
+
+# --- skill tag generation ---
+
+def test_skill_tags_include_mcp_imported_and_hostname():
+    tools = [_MockTool("tool_d")]
+    client, _, mock_store = _make_client(tools=tools)
+    mock_store.create_skill.return_value = {"uuid": "s-uuid", "name": "mock_mcp_9500_sse"}
+    with _patch_mcp(tools):
+        resp = client.post(
+            "/plugins/mcp-importer/import-tools",
+            json={"mcp_url": "http://mock-mcp:9500/sse", "create_skill": True},
+        )
+    assert resp.status_code == 200
+    skill_data = mock_store.create_skill.call_args.args[0]
+    assert "mcp" in skill_data["tags"]
+    assert "imported" in skill_data["tags"]
+    assert "mock-mcp" in skill_data["tags"]
+
+
+# --- user-supplied tags merging ---
+
+def test_user_tags_merged_into_tool_tags():
+    tools = [_MockTool("tool_e")]
+    client, _, mock_store = _make_client(tools=tools)
+    with _patch_mcp(tools):
+        resp = client.post(
+            "/plugins/mcp-importer/import-tools",
+            json={
+                "mcp_url": "http://mock-mcp:9500/sse",
+                "create_skill": False,
+                "tags": ["my-project", "prod"],
+            },
+        )
+    assert resp.status_code == 200
+    data_arg = mock_store.create_tool.call_args.args[0]
+    assert "my-project" in data_arg["tags"]
+    assert "prod" in data_arg["tags"]
+
+
+def test_user_tags_merged_into_skill_tags():
+    tools = [_MockTool("tool_f")]
+    client, _, mock_store = _make_client(tools=tools)
+    mock_store.create_skill.return_value = {"uuid": "s-uuid", "name": "mock_mcp_9500_sse"}
+    with _patch_mcp(tools):
+        resp = client.post(
+            "/plugins/mcp-importer/import-tools",
+            json={
+                "mcp_url": "http://mock-mcp:9500/sse",
+                "create_skill": True,
+                "tags": ["team-alpha"],
+            },
+        )
+    assert resp.status_code == 200
+    skill_data = mock_store.create_skill.call_args.args[0]
+    assert "team-alpha" in skill_data["tags"]
+
+
+def test_user_tags_deduped():
+    tools = [_MockTool("tool_g")]
+    client, _, mock_store = _make_client(tools=tools)
+    with _patch_mcp(tools):
+        resp = client.post(
+            "/plugins/mcp-importer/import-tools",
+            json={
+                "mcp_url": "http://mock-mcp:9500/sse",
+                "create_skill": False,
+                "tags": ["mcp", "unique-tag"],  # "mcp" is already auto-generated
+            },
+        )
+    assert resp.status_code == 200
+    data_arg = mock_store.create_tool.call_args.args[0]
+    assert data_arg["tags"].count("mcp") == 1
+    assert "unique-tag" in data_arg["tags"]
 
 
 # ── Validation tests ──────────────────────────────────────────────────────────
