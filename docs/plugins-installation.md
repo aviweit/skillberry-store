@@ -8,7 +8,7 @@ The skillberry-store supports a flexible plugin architecture that allows extendi
 
 ### 1. Install Without Plugins (Minimal Installation)
 
-When you install skillberry-store without any extras, you get the core functionality only:
+When you install skillberry-store, two plugins are included by default:
 
 ```bash
 pip install skillberry-store
@@ -16,9 +16,14 @@ pip install skillberry-store
 
 This installs:
 - Core skillberry-store functionality
-- No plugins (plugins can be added later)
+- skillberry-plugin-dedupe (AI-powered duplicate skill detection) — **default**
+- skillberry-plugin-kagenti-approver (automatic kagenti-approved labeling) — **default**
 
-The store will start normally without any plugins. Plugin-related API endpoints will be available but will return empty lists.
+Both default plugins can be uninstalled individually if not needed:
+```bash
+pip uninstall skillberry-plugin-dedupe
+pip uninstall skillberry-plugin-kagenti-approver
+```
 
 ### 2. Install All Plugins
 
@@ -33,9 +38,10 @@ This installs:
 - skillberry-plugin-creator (AI-powered content creation)
 - skillberry-plugin-evaluator (AI-powered content evaluation and tagging)
 - skillberry-plugin-security (AI-powered security evaluation)
-- skillberry-plugin-dedupe (AI-powered duplicate skill detection)
+- skillberry-plugin-dedupe (AI-powered duplicate skill detection) — also a default plugin
 - skillberry-plugin-mcp-importer (import tools from any MCP SSE server)
 - skillberry-plugin-anthropic-skill-generator (generate Anthropic skills from descriptions using Claude Code)
+- skillberry-plugin-kagenti-approver (automatic kagenti-approved labeling) — also a default plugin
 
 ### 3. Install Specific Plugins
 
@@ -64,6 +70,11 @@ pip install skillberry-store[plugin-mcp-importer]
 #### Anthropic Skill Generator Plugin Only
 ```bash
 pip install skillberry-store[plugin-anthropic-skill-generator]
+```
+
+#### Kagenti Approver Plugin Only
+```bash
+pip install skillberry-store[plugin-kagenti-approver]
 ```
 
 #### Multiple Specific Plugins
@@ -345,6 +356,40 @@ curl -X POST http://localhost:8000/api/plugins/anthropic-skill-generator/generat
 1. Request-specific parameters (highest)
 2. Environment variables
 3. `~/.claude/settings.json` (lowest - automatic)
+
+### Kagenti Approver Plugin (`skillberry-plugin-kagenti-approver`)
+
+**Purpose:** Automatically label skills as `kagenti-approved` when their score tags satisfy configurable criteria.
+
+**Features:**
+- Reacts to `content_added:skill` and `content_updated:skill` events — no manual trigger needed
+- Adds `kagenti-approved` tag when all criteria in any OR-group are met
+- Removes `kagenti-approved` tag when criteria are no longer met (revocation on update)
+- No-op if approval state has not changed (avoids unnecessary writes)
+- No LLM or external dependencies
+
+**Configuration:**
+```bash
+# Optional — defaults to "security-score>=9,performance-score>=8" if not set
+export KAGENTI_CRITERIA="security-score>=9,performance-score>=8"
+```
+
+**Criteria syntax:**
+- `,` = AND (all conditions in a group must pass)
+- `|` = OR (any group passing is sufficient)
+- Supported operators: `>=`, `>`, `<=`, `<`, `=`, `!=`
+- Each condition: `{tag-prefix}{operator}{number}` (e.g. `security-score>=9`)
+
+**Examples:**
+```bash
+# Default: both scores required
+KAGENTI_CRITERIA="security-score>=9,performance-score>=8"
+
+# Either a perfect security score, or both scores at lower thresholds
+KAGENTI_CRITERIA="security-score>=10|security-score>=7,performance-score>=8"
+```
+
+**No API endpoints** — operates entirely in the background via event handlers.
 
 ## LLM Configuration
 
