@@ -16,6 +16,13 @@ dependencies = [
   "typing-extensions (>=4.7.1)",
 ]
 
+[project.optional-dependencies]
+# See the comment on EXTRAS in setup.py: markers keep this to the platforms with
+# a published wheel, so the SDK still installs everywhere without one.
+cli = [
+  "skillberry-store-cli; (sys_platform == 'linux' and platform_machine in 'x86_64 aarch64') or (sys_platform == 'darwin' and platform_machine in 'x86_64 arm64') or (sys_platform == 'win32' and platform_machine in 'AMD64 x86_64')",
+]
+
 [project.urls]
 Repository = "https://github.com/GIT_USER_ID/GIT_REPO_ID"
 
@@ -31,8 +38,6 @@ types-python-dateutil = ">= 2.8.19.14"
 mypy = ">= 1.5"
 
 
-[tool.poetry.scripts]
-sbs = "skillberry_store_sdk.sdk_cli:cli"
 [build-system]
 requires = ["poetry-core>=1.0.0"]
 build-backend = "poetry.core.masonry.api"

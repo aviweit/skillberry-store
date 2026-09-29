@@ -18,6 +18,48 @@ This table lists the default ports, host URLs and overall service configuration 
 > You can override the default values by setting the corresponding environment variables in your deployment configuration.
 
 
+This table lists the native CLI distribution configuration — how a running store
+prepares and serves the `sbs` binary (see [the CLI guide](cli.md) and
+[docs/design/new_cli.md](design/new_cli.md)).
+
+| Configuration | Default value | Environment Variables Override | Notes |
+|---------------|---------------|--------------------------------|-------|
+| CLI downloads | `on` | `SBS_CLI_DOWNLOAD` | `off` **unregisters `GET`/`HEAD` `/cli/download` entirely** — it becomes a plain 404 and appears in no route table or OpenAPI schema, rather than existing and refusing. This is the rollback switch for the whole feature |
+
+That is the only setting. Everything else preparing and serving an artifact needs
+is derived rather than configured:
+
+| Behaviour | How it is decided |
+|-----------|-------------------|
+| Where the cross-compiled binaries are read from | fixed: `cli-prebuilt/` at the top of the tree — where `make cli-dist` writes them, and `/app/cli-prebuilt` in the container image |
+| Where prepared artifacts are written | fixed: `cli-dist/` at the top of the tree — a cache, not state |
+| When preparation runs | at startup, whenever downloads are on; skipped per platform when the stamp already matches |
+| How the store's URL gets into a binary | per platform, cheapest mechanism that works: an in-place slot rewrite for four of five platforms, and a real build for `darwin-arm64` when a Go toolchain is present (a sidecar file when it is not) |
+| Concurrent download starts | fixed at 8 |
+
+`SBS_PUBLIC_URL` (above) is what gets **baked into the downloaded binaries**, so a
+user who downloads the CLI from your store gets one that talks to your store with
+no configuration. Without it, artifacts are served as built — they carry their
+compile-time default and a user needs `sbs connect <url>` — and the boot log says
+so.
+
+These two are read by the **CLI on the user's machine**, not by the store:
+
+| Configuration | Default value | Environment Variables Override | Notes |
+|---------------|---------------|--------------------------------|-------|
+| Store URL override | *(the baked-in URL)* | `SBS_URL` | Points `sbs` at a different store for one invocation. Precedence: `sbs connect` (user config) → `SBS_URL` → the baked-in URL |
+| Bearer token | *(unset)* | `SBS_TOKEN` | A token for CI/scripting instead of an interactive prompt. Select it with `sbs -p env-token <command>`. The token stays in the environment and never appears on the command line |
+
+> **`/cli/download` is unauthenticated in every access-control mode.** It is listed
+> in the built-in `unauthenticated_paths` defaults alongside `/health` and the auth
+> endpoints, and a config file's own list **adds to** those defaults rather than
+> replacing them — so an operator cannot accidentally close it. A browser, `curl`,
+> CI or a freshly downloaded binary has no token to offer, and a user who cannot
+> sign in yet is exactly the user who needs the CLI. The endpoint serves no tenant
+> data, no configuration and no login message, and accepts no request body. To
+> remove it entirely, use `SBS_CLI_DOWNLOAD=off`.
+
+
 This table lists the `npx skills add` publishing configuration (see
 [the npx section of the CLI guide](cli.md#install-skills-into-your-agent-with-npx)
 and [docs/design/npx.md](design/npx.md)).

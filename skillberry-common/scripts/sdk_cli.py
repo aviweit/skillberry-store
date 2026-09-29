@@ -1,10 +1,42 @@
 """CLI module for {{API_NAME}} SDK using restish.
 
+DEPRECATED. Do not build on this template; it is scheduled for removal.
+
 Thin shim over the `restish` CLI (https://rest.sh). This file is the
 generation template; ``make generate-sdk`` substitutes ``{{API_NAME}}``
 (lowercase acronym, e.g. ``sbs``) and ``{{API_URL}}`` (compiled-in base
 URL) before it lands in the generated SDK. See
 docs/design/access-control.md §10.1 for the CLI/auth story.
+
+Why deprecated
+--------------
+The shim delegates with ``os.execvp("restish", ...)``, so it *replaces
+itself* and never sees restish's output. Two consequences make it a dead
+end rather than something to improve:
+
+1. Every usage line, error and hint the user reads comes from restish and
+   says "restish" — including commands like ``restish sbs list-skills``
+   that do not work when typed. The shim cannot rewrite any of it.
+2. The command surface is inherently two levels deep
+   (``restish <api> <operation>``), so even renaming the binary yields
+   ``sbs sbs list-skills``.
+
+It also requires a separate ``restish`` install on ``PATH``, which is a
+prerequisite users hit before they ever reach the tool.
+
+The replacement embeds restish as a Go *library*
+(``github.com/rest-sh/restish/v2``), which takes the command name, root
+description, config/cache paths and auth handler as configuration. See
+skillberry-store ``docs/design/new_cli.md`` for the full design and
+``client/go/cli/`` for the implementation.
+
+Opting out
+----------
+Generation of this file is gated behind ``SDK_PY_CLI`` (``.mk/dev.mk``),
+which defaults to ``1`` so existing assets are unaffected. An asset with
+its own CLI sets ``SDK_PY_CLI := 0`` in ``.mk/local.mk``, as
+skillberry-store does. This template is removed from skillberry-common
+once no asset sets ``SDK_PY_CLI=1``.
 """
 import getpass
 import json

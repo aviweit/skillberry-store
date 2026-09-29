@@ -206,6 +206,20 @@ update-sdk: ## Update the SDK, if needed
 
 PYTHON_SDK_DIR = client/python/$(SERVICE_NAME_CN)_sdk
 
+# Whether to inject the Python `restish` shim CLI (scripts/sdk_cli.py) into the
+# generated SDK and declare it as a console script.
+#
+# Defaults to 1 so every asset that relies on the shim today keeps its CLI with
+# no change. An asset that has replaced the shim with its own CLI sets
+# `SDK_PY_CLI := 0` in .mk/local.mk; skillberry-store does, because its `sbs` is
+# now a native Go binary that embeds restish as a library rather than shelling
+# out to it (skillberry-store docs/design/new_cli.md §4.6 / G6).
+#
+# The template itself is deprecated: the subprocess model it is built on is what
+# made the CLI's output impossible to brand. It is removed from
+# skillberry-common once no asset sets SDK_PY_CLI=1.
+SDK_PY_CLI ?= 1
+
 generate-sdk: install-requirements # Generate SDK
 	@mkdir -p $(PYTHON_SDK_DIR)
 	@rm -fr $(PYTHON_SDK_DIR)/*
@@ -213,22 +227,76 @@ generate-sdk: install-requirements # Generate SDK
 		-g python \
 		-o $(PYTHON_SDK_DIR) \
 		--package-name $(SERVICE_NAME_CN)_sdk
+	@echo "==> Backing up setup.py and pyproject.toml"; \
+		cp $(PYTHON_SDK_DIR)/setup.py $(PYTHON_SDK_DIR)/setup.py.bak; \
+		cp $(PYTHON_SDK_DIR)/pyproject.toml $(PYTHON_SDK_DIR)/pyproject.toml.bak;
+	@echo "==> Fixing pyproject.toml build backend to use Poetry..."
+	@toml set --to-array --toml-path $(PYTHON_SDK_DIR)/pyproject.toml "build-system.requires" "[\"poetry-core>=1.0.0\"]"
+	@toml set --toml-path $(PYTHON_SDK_DIR)/pyproject.toml "build-system.build-backend" "poetry.core.masonry.api"
+ifeq ($(SDK_PY_CLI),1)
 	@echo "==> Adding CLI module to SDK..."
 	@sed -e 's|{{API_NAME}}|$(ACRONYM_LC)|g' \
 	     -e 's|{{API_URL}}|$(OPEN_API_SPEC_URL)|g' \
 	     $(SB_COMMON_PATH)/scripts/sdk_cli.py > $(PYTHON_SDK_DIR)/$(SERVICE_NAME_CN)_sdk/sdk_cli.py
-	@echo "==> Backing up setup.py and pyproject.toml"; \
-		cp $(PYTHON_SDK_DIR)/setup.py $(PYTHON_SDK_DIR)/setup.py.bak; \
-		cp $(PYTHON_SDK_DIR)/pyproject.toml $(PYTHON_SDK_DIR)/pyproject.toml.bak;
 	@echo "==> Updating setup.py to add CLI entry point..."
 	@sed -i '/package_data=/i\    entry_points={\n        "console_scripts": [\n            "$(ACRONYM_LC)=$(SERVICE_NAME_CN)_sdk.sdk_cli:cli",\n        ],\n    },' $(PYTHON_SDK_DIR)/setup.py
-	@echo "==> Fixing pyproject.toml build backend to use Poetry..."
-	@toml set --to-array --toml-path $(PYTHON_SDK_DIR)/pyproject.toml "build-system.requires" "[\"poetry-core>=1.0.0\"]"
-	@toml set --toml-path $(PYTHON_SDK_DIR)/pyproject.toml "build-system.build-backend" "poetry.core.masonry.api"
 	@echo "==> Adding CLI entry point to [tool.poetry.scripts]..."
 	@toml add_section --toml-path $(PYTHON_SDK_DIR)/pyproject.toml "tool.poetry.scripts"
 	@toml set --toml-path $(PYTHON_SDK_DIR)/pyproject.toml "tool.poetry.scripts.$(ACRONYM_LC)" "$(SERVICE_NAME_CN)_sdk.sdk_cli:cli"
+else
+	@echo "==> SDK_PY_CLI=0: leaving the SDK a pure Python library (no $(ACRONYM_LC) console script)"
+	@echo "==> Adding the [cli] extra pointing at the native CLI wheel..."
+	@# The SDK stays pure Python and universal, but `pip install
+	@# <sdk>[cli]` should still get the user a working CLI. Environment
+	@# markers keep it to the platforms with a published wheel: on anything
+	@# else the extra resolves to nothing rather than failing the install.
+	@#
+	@# Re-applied here on every generation because `generate-sdk` wipes the
+	@# SDK directory first -- without this the extra would silently vanish
+	@# the next time the SDK is regenerated.
+	@python3 -c "$$SDK_CLI_EXTRA_PY" \
+		"$(PYTHON_SDK_DIR)" "$(ASSET_NAME)-cli"
+endif
 	@echo "==> Removing [project.scripts] section if it exists..."
 	@sed -i '/^\[project\.scripts\]/,/^$$/d' $(PYTHON_SDK_DIR)/pyproject.toml
-	@echo "==> SDK generation complete with CLI support"
+	@echo "==> SDK generation complete$(if $(filter 1,$(SDK_PY_CLI)), with CLI support,)"
+
+# Injects the `[cli]` extra into both setup.py and pyproject.toml. A Python
+# helper rather than a chain of `sed`/`toml` calls because the value is a
+# PEP 508 requirement containing commas, quotes and parentheses -- exactly the
+# characters that make shell-quoting through make fragile.
+define SDK_CLI_EXTRA_PY
+import pathlib, re, sys
+sdk_dir, cli_pkg = pathlib.Path(sys.argv[1]), sys.argv[2]
+markers = " or ".join([
+    "(sys_platform == 'linux' and platform_machine in 'x86_64 aarch64')",
+    "(sys_platform == 'darwin' and platform_machine in 'x86_64 arm64')",
+    "(sys_platform == 'win32' and platform_machine in 'AMD64 x86_64')",
+])
+req = f"{cli_pkg}; {markers}"
+
+setup_py = sdk_dir / "setup.py"
+if setup_py.is_file():
+    text = setup_py.read_text()
+    if "extras_require" not in text:
+        text = text.replace(
+            "    install_requires=REQUIRES,",
+            '    install_requires=REQUIRES,\n    extras_require={"cli": ["' + req + '"]},',
+            1,
+        )
+        setup_py.write_text(text)
+
+pyproject = sdk_dir / "pyproject.toml"
+if pyproject.is_file():
+    text = pyproject.read_text()
+    if "[project.optional-dependencies]" not in text:
+        block = '[project.optional-dependencies]\ncli = [\n  "' + req + '",\n]\n\n'
+        if "[project.urls]" in text:
+            text = text.replace("[project.urls]", block + "[project.urls]", 1)
+        else:
+            text += "\n" + block
+        pyproject.write_text(text)
+print("    [cli] extra -> " + cli_pkg)
+endef
+export SDK_CLI_EXTRA_PY
 

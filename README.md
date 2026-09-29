@@ -256,21 +256,39 @@ The service can be consumed via skillberry store service sdk. Refer to [skillber
 
 ## Engage with the Service via CLI 💻
 
-A CLI (auto-generated) that provides command-line access to all API operations.
-Example usage:
+`sbs` is a **single native executable** — no Python, no `pip`, nothing else to
+install — whose commands are generated from the store's own OpenAPI spec, so they
+always match the store you are pointed at.
+
+Every running store serves it, for all supported platforms, with no sign-in:
 
 ```bash
-# Install the SDK (includes CLI)
-pip install skillberry-store-sdk
+# Download straight from your store; the response carries the sha256 to check
+curl -fsSL "http://localhost:8000/cli/download?platform=linux-amd64" -o sbs && chmod +x sbs
 
-# Use the CLI
-sbs --help                     # Show available commands
-sbs connect http://prod:8000   # Connect to different server
+# A binary downloaded from a store already talks to it — no `connect` step
 sbs list-skills                # List all skills
 sbs get-tool convert           # Get a specific tool
 sbs create-vmcp-server         # Create a VMCP server
 sbs search-tools "calculator"  # Search for tools
+
+sbs --help                     # Show available commands
+sbs connect http://prod:8000   # Point at a different server
+sbs cli doctor                 # Show resolved URLs, paths and spec freshness
 ```
+
+Platform ids are `<goos>-<goarch>`; add `&format=archive` for a tar.gz/zip, which
+is the better choice for a browser download. There is also a **Download CLI**
+button in the store's web UI, and `pip install skillberry-store-cli` for a
+platform wheel carrying the same binary.
+
+> **Changed:** `pip install skillberry-store-sdk` no longer provides `sbs` — it
+> used to, and it required a manual `restish` install. Use
+> `skillberry-store-cli`, or `skillberry-store-sdk[cli]` for both. The SDK
+> remains a pure Python library. See [docs/cli.md](docs/cli.md).
+
+Authentication happens on demand: any command prompts when the store requires it
+and caches the token, and `SBS_TOKEN` covers CI.
 
 Available command groups:
 

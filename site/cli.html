@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>CLI — Skillberry Store</title>
-  <meta name="description" content="The sbs command-line interface — an auto-generated CLI (built on restish) that gives you every Skillberry Store API operation from your terminal, with JSON, YAML, and table output.">
+  <meta name="description" content="The sbs command-line interface — a single native executable that gives you every Skillberry Store API operation from your terminal, with JSON, YAML, and table output. Download it straight from any running store.">
   <link rel="canonical" href="https://skillberry-ai.github.io/skillberry-store/cli.html">
   <meta property="og:type" content="article">
   <meta property="og:title" content="CLI — Skillberry Store">
@@ -46,7 +46,7 @@
     <div class="page-narrow">
       <span class="eyebrow">CLI</span>
       <h1>The <code>sbs</code> command</h1>
-      <p class="doc lead" style="margin-bottom:0">An auto-generated command-line interface that gives you convenient access to every API operation from your terminal — built as a wrapper around <a href="https://rest.sh/">restish</a>, which generates commands directly from the OpenAPI spec.</p>
+      <p class="doc lead" style="margin-bottom:0">A single native executable that gives you every Skillberry Store API operation from your terminal. Its commands are generated from the store's own OpenAPI spec, so they always match the store you are pointed at.</p>
     </div>
   </div>
 
@@ -58,23 +58,30 @@
       <li><strong>Type-safe parameters</strong> based on the OpenAPI schema</li>
       <li><strong>Automatic documentation</strong> from API descriptions</li>
       <li><strong>Multiple output formats</strong> — JSON, YAML, and table</li>
+      <li><strong>No prerequisites</strong> — one static binary; no Python, no <code>pip</code>, nothing else to install</li>
+      <li><strong>Pre-configured</strong> — a binary downloaded from a store already talks to that store</li>
     </ul>
 
     <h2>Install</h2>
-    <p>The CLI ships with the Python SDK:</p>
-    <pre><code>pip install skillberry-store-sdk</code></pre>
-    <p>It requires <code>restish</code> to be installed. If it's missing, the CLI prints installation instructions:</p>
-    <pre><code># Option 1: with Go
-go install github.com/rest-sh/restish@latest
-
-# Option 2: download a pre-built binary from
-# https://github.com/rest-sh/restish/releases</code></pre>
+    <p>Every running store serves the CLI for all supported platforms, and the download needs no sign-in:</p>
+    <pre><code>curl -fsSL "http://localhost:8000/cli/download?platform=linux-amd64" -o sbs
+chmod +x sbs</code></pre>
+    <p>One endpoint; the platform is a query argument. The response carries the artifact's sha256 in <code>X-SBS-SHA256</code>, and a <code>HEAD</code> request returns it without transferring the binary. Add <code>&amp;format=archive</code> for a tar.gz or zip — the better choice in a browser, since an archive keeps the executable bit and avoids macOS quarantine.</p>
+    <p>You can also grab it from the store's web UI — there's a <strong>Download CLI</strong> button in the masthead — or with <code>pip</code>:</p>
+    <pre><code>pip install skillberry-store-cli</code></pre>
+    <p>Already have <code>sbs</code>? It can fetch itself, verifying the checksum before writing:</p>
+    <pre><code>sbs download-cli --platform darwin-arm64   # a build for another machine
+sbs self-update                            # replace this binary</code></pre>
+    <p>Supported platforms: <code>linux-amd64</code>, <code>linux-arm64</code>, <code>darwin-amd64</code>, <code>darwin-arm64</code>, <code>windows-amd64</code>. The binaries are not yet code-signed, so a <em>browser</em> download on macOS is quarantined — the <code>curl</code> install script avoids that, or clear it with <code>xattr -dr com.apple.quarantine</code>.</p>
+    <p class="doc"><em>Upgrading?</em> <code>pip install skillberry-store-sdk</code> no longer provides <code>sbs</code>; use <code>skillberry-store-cli</code> or <code>skillberry-store-sdk[cli]</code>. The SDK itself remains a pure Python library.</p>
 
     <h2>Connect</h2>
-    <p>By default the CLI connects to <code>http://0.0.0.0:8000</code> and remembers your connection for future commands:</p>
+    <p>A binary downloaded from a store needs no configuration. To point one somewhere else:</p>
     <pre><code>sbs --help                       # Show all available commands
-sbs connect http://prod:8000     # Point at a different server
+sbs connect http://prod:8000     # Point at a different server, permanently
+SBS_URL=http://prod:8000 sbs list-skills   # ... or just for one command
 sbs list-skills                  # List all skills</code></pre>
+    <p>Authentication happens on demand: any command prompts when the store requires it, and caches the token. <code>SBS_TOKEN</code> covers CI.</p>
 
     <h2>Command groups</h2>
     <div class="table-wrap">

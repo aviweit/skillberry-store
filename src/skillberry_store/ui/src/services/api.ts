@@ -13,6 +13,7 @@ import type {
   Plugin,
   PluginActionResult,
 } from '@/types';
+import type { CliArtifact, CliFormat, CliPlatform } from '@/types/cli';
 
 const API_BASE = '';
 
@@ -688,6 +689,65 @@ export const pluginsApi = {
       body: JSON.stringify(params),
     });
     return handleResponse<PluginActionResult>(response);
+  },
+};
+
+/**
+ * The CLI download surface (docs/design/new_cli.md §5.5).
+ *
+ * One endpoint. `inspect` sends `HEAD` to learn whether a platform is available
+ * and what its artifact should hash to, without transferring ~32 MB; `url` builds
+ * the href a plain `<a download>` points at.
+ *
+ * No credentials are sent, deliberately: the endpoint is unauthenticated in every
+ * access-control mode, and the download is offered on the sign-in screen — where
+ * no session exists yet. `fetch` here must therefore behave identically before
+ * and after login.
+ */
+export const cliApi = {
+  /** The download href for one platform and format. */
+  url: (platform: CliPlatform, format: CliFormat = 'raw'): string =>
+    `${API_BASE}/cli/download?platform=${encodeURIComponent(platform)}` +
+    `&format=${encodeURIComponent(format)}`,
+
+  /**
+   * What the store would serve for a platform, read from response headers.
+   *
+   * Returns `null` when the platform has no artifact (404) and throws when the
+   * store cannot be reached at all, so the caller can tell "not offered" from
+   * "something is wrong".
+   */
+  inspect: async (
+    platform: CliPlatform,
+    format: CliFormat = 'raw'
+  ): Promise<CliArtifact | null> => {
+    const response = await fetch(cliApi.url(platform, format), { method: 'HEAD' });
+
+    if (response.status === 404) return null;
+    if (response.status === 503) {
+      return {
+        platform,
+        state: 'preparing',
+        retryAfter: Number(response.headers.get('Retry-After')) || 10,
+      };
+    }
+    if (!response.ok) {
+      throw new ApiError(
+        `The store returned HTTP ${response.status} for the ${platform} build`,
+        response.status
+      );
+    }
+
+    return {
+      platform,
+      state: 'ready',
+      sha256: response.headers.get('X-SBS-SHA256') ?? '',
+      size: Number(response.headers.get('Content-Length')) || 0,
+      version: response.headers.get('X-SBS-CLI-Version') ?? '',
+      urlInjection:
+        (response.headers.get('X-SBS-CLI-URL-Injection') as CliArtifact['urlInjection']) ??
+        undefined,
+    };
   },
 };
 

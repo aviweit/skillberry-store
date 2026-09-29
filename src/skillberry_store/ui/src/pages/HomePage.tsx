@@ -1,6 +1,7 @@
 // Copyright 2025 IBM Corp.
 // Licensed under the Apache License, Version 2.0
 
+import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
   PageSection,
@@ -20,12 +21,27 @@ import {
   FileCodeIcon,
   ServerIcon,
   ArrowRightIcon,
+  DownloadIcon,
 } from '@patternfly/react-icons';
+import { CliDownloadModal } from '@/components/CliDownloadModal';
 
 export function HomePage() {
   const navigate = useNavigate();
+  const [isCliModalOpen, setIsCliModalOpen] = useState(false);
 
-  const features = [
+  interface FeatureCard {
+    title: string;
+    description: string;
+    icon: React.ReactNode;
+    color: string;
+    /** Navigating cards. Mutually exclusive with `action`. */
+    path?: string;
+    /** Cards that do something in place, like opening the CLI download modal. */
+    action?: () => void;
+    actionLabel?: string;
+  }
+
+  const features: FeatureCard[] = [
     {
       title: 'Skills',
       description: 'Organize collections of tools and snippets into reusable skills.',
@@ -54,6 +70,17 @@ export function HomePage() {
       path: '/vmcp-servers',
       color: '#F0AB00',
     },
+    {
+      title: 'CLI',
+      description:
+        'Download the sbs command-line interface — a single native binary, already pointed at this store.',
+      icon: <DownloadIcon />,
+      // No path: this card opens the download modal rather than navigating, so
+      // the card's click handler branches on `action` below.
+      action: () => setIsCliModalOpen(true),
+      actionLabel: 'Download CLI',
+      color: '#6A6E73',
+    },
   ];
 
   return (
@@ -74,7 +101,13 @@ export function HomePage() {
         <Gallery hasGutter minWidths={{ default: '100%', md: '50%', xl: '25%' }}>
           {features.map((feature) => (
             <GalleryItem key={feature.title}>
-              <Card isFullHeight isClickable onClick={() => navigate(feature.path)}>
+              <Card
+                isFullHeight
+                isClickable
+                onClick={() =>
+                  feature.action ? feature.action() : navigate(feature.path!)
+                }
+              >
                 <CardTitle>
                   <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
                     <span style={{ color: feature.color }}>{feature.icon}</span>
@@ -91,10 +124,14 @@ export function HomePage() {
                       iconPosition="right"
                       onClick={(e) => {
                         e.stopPropagation();
-                        navigate(feature.path);
+                        if (feature.action) {
+                          feature.action();
+                        } else {
+                          navigate(feature.path!);
+                        }
                       }}
                     >
-                      View {feature.title}
+                      {feature.actionLabel ?? `View ${feature.title}`}
                     </Button>
                   </div>
                 </CardBody>
@@ -103,6 +140,11 @@ export function HomePage() {
           ))}
         </Gallery>
       </PageSection>
+
+      <CliDownloadModal
+        isOpen={isCliModalOpen}
+        onClose={() => setIsCliModalOpen(false)}
+      />
 
       <PageSection variant="light">
         <TextContent>

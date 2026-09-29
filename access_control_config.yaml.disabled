@@ -17,14 +17,14 @@ mode: disabled
 #   false       nothing is; the /pub routes are not registered at all
 #   selective   each skill's own `npx_publish` flag decides (the DEFAULT when
 #               this key is absent). A skill that has not set it is NOT
-#               published — opt one in with the toggle on its page in the UI, or
-#               `PUT /skills/{name}` with `npx_publish: true`.
+#               published, so skills are opted in deliberately — edit one with
+#               `PUT /skills/{name}` or the toggle on its page in the UI.
 #
 # `true`/`false` ignore the per-skill flag, so either one publishes or withdraws
 # the whole store in a single edit.
 #
-# This config is `mode: disabled`, where nothing is protected anyway, so it ships
-# `true` to make a bare dev checkout usable out of the box.
+# This shipped config is `mode: disabled`, where nothing is protected anyway, so
+# it ships `true` to make a bare dev checkout usable out of the box.
 npx_publish: true
 
 unauthenticated_paths:
@@ -53,6 +53,14 @@ unauthenticated_paths:
   # /pub/*/.well-known/* is inexpressible, so /pub/ MUST remain a dedicated
   # prefix with nothing else ever mounted under it (§5.10 #1).
   - GET /pub/*
+  # CLI download (docs/design/new_cli.md §5.5). A browser, `curl`, CI or a
+  # freshly downloaded binary has no token to offer, and a user who cannot sign
+  # in yet is exactly the user who wants the CLI. It serves no tenant data, no
+  # config and no login message, and accepts no request body.
+  # HEAD is listed alongside GET because /cli/download serves both, and because
+  # HEAD is how a client reads the artifact's sha256 without transferring it.
+  - GET /cli*
+  - HEAD /cli*
 
 # --- Mode-specific: standalone only -------------------------------------
 standalone:

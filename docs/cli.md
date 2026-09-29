@@ -1,41 +1,102 @@
 # Skillberry Store CLI Documentation
 
-The Skillberry Store SDK includes an auto-generated command-line interface (CLI) that provides convenient access to all API operations from your terminal.
+`sbs` is the Skillberry Store command-line interface: a **single native executable** with no runtime dependencies. Its commands are generated from the store's own OpenAPI spec, so they always match the store you are pointed at.
 
 ## Overview
-
-The CLI is built as a wrapper around [restish](https://rest.sh/), a powerful REST API client that automatically generates commands from OpenAPI specifications. This means:
 
 - **Auto-generated commands** for all API endpoints
 - **Type-safe parameters** based on the OpenAPI schema
 - **Automatic documentation** from API descriptions
 - **Multiple output formats** (JSON, YAML, table)
+- **No prerequisites** — one static binary; no Python, no `pip`, no separate REST client to install
+- **Pre-configured** — a binary downloaded from a store already talks to that store
+
+Internally `sbs` embeds [restish](https://rest.sh/) as a Go library. That is an implementation detail: you never install, configure or invoke restish yourself. Its MIT licence is reproduced in this repository's [LICENSE](../LICENSE) under *Third-party software notices*, and `sbs --version` points at it.
+
+> **Upgrading from an older release?** `pip install skillberry-store-sdk` used to install an `sbs` script that required a manual `restish` install. It no longer provides `sbs` at all — see [Installation](#installation) for the replacements. The generated SDK remains a pure Python library.
 
 ## Installation
 
-The CLI is included with the Python SDK:
+### From a running store (recommended)
+
+Any store serves the CLI, unauthenticated, for every supported platform. One
+endpoint, one query argument:
 
 ```bash
-pip install skillberry-store-sdk
+curl -fsSL "http://localhost:8000/cli/download?platform=linux-amd64" -o sbs
+chmod +x sbs
 ```
 
-### Prerequisites
+Platform ids are `<goos>-<goarch>`: `linux-amd64`, `linux-arm64`, `darwin-amd64`,
+`darwin-arm64`, `windows-amd64`. Omit `platform` and the store detects it from the
+request, which is convenient in a browser and a guess everywhere else — a script
+should always name it.
 
-The CLI requires `restish` to be installed. If not present, the CLI will provide installation instructions:
+The response carries the artifact's sha256 in `X-SBS-SHA256`, so you can check
+what you received:
 
-**Option 1: Using Go**
 ```bash
-go install github.com/rest-sh/restish@latest
+curl -fsSI "http://localhost:8000/cli/download?platform=linux-amd64" | grep -i x-sbs-sha256
+shasum -a 256 sbs
 ```
 
-**Option 2: Download pre-built binaries**
-- Visit [restish releases](https://github.com/rest-sh/restish/releases)
-- Download the appropriate binary for your platform
-- Add it to your PATH
+`HEAD` (`-I`) answers with the digest, the size and the version **without**
+transferring the ~32 MB body, so it is cheap to ask first.
+
+`&format=archive` returns a `.tar.gz` (`.zip` on Windows) instead of a bare
+executable. Prefer it for a *browser* download: an archive preserves the
+executable bit, and on macOS it avoids the Gatekeeper quarantine attribute that a
+directly-downloaded binary picks up.
+
+You can also download from the store's web UI — there is a **Download CLI** button
+in the masthead, a card on the home page, and the same icon-only button on the
+sign-in screen.
+
+### With pip
+
+```bash
+pip install skillberry-store-cli
+```
+
+A platform wheel carrying the same native binary (the pattern `ruff` and `uv`
+use). A wheel has no store baked in, so point it at one once:
+
+```bash
+sbs connect https://store.example.com
+```
+
+To get the SDK and the CLI together:
+
+```bash
+pip install 'skillberry-store-sdk[cli]'
+```
+
+### With an existing `sbs`
+
+```bash
+sbs download-cli --platform darwin-arm64   # fetch a build for another machine
+sbs self-update                            # replace this binary with the store's
+```
+
+Both read the expected sha256 from the store's response and verify the bytes
+before writing anything.
+
+### Supported platforms
+
+`linux-amd64`, `linux-arm64`, `darwin-amd64`, `darwin-arm64`, `windows-amd64`. A
+`HEAD` on the download endpoint tells you whether a given store has a particular
+build ready: `200` yes, `404` no build, `503` still being prepared.
+
+### Unsigned binaries
+
+The artifacts are not code-signed or notarized, so:
+
+- **macOS** quarantines a *browser* download. Either fetch it with `curl` (which
+  sets no quarantine attribute), or clear it:
+  `xattr -dr com.apple.quarantine ~/Downloads/sbs`
+- **Windows** SmartScreen may warn on first run.
 
 ## Basic Usage
-
-The CLI command is `sbs` (Skillberry Store):
 
 ```bash
 sbs --help                    # Show all available commands
@@ -46,7 +107,11 @@ sbs <command> [args] [flags]  # General command structure
 
 ### Default Connection
 
-By default, the CLI connects to `http://0.0.0.0:8000`. The configuration is automatically created in `~/.config/restish/apis.json` on first use.
+A binary downloaded from a store is already configured to talk to that store — no `connect` step. A binary built from source defaults to `http://localhost:8000`.
+
+Configuration lives in `~/.config/sbs/sbs.json` (created on first use, mode `0600` because it can hold a token), with the spec cache under `~/.cache/sbs`. Run `sbs cli doctor` to see every resolved path.
+
+If you used the previous `sbs`, its `apis.sbs` entry is copied out of `~/.config/restish/restish.json` once, automatically, with a note on stderr. The old file is left untouched.
 
 ### Connecting to Different Servers
 
@@ -194,7 +259,7 @@ sbs purge-all
 
 ### Output Formats
 
-Restish supports multiple output formats:
+`sbs` supports multiple output formats:
 
 ```bash
 # JSON output (default)
@@ -245,40 +310,66 @@ sbs list-tools -v
 
 ## Architecture
 
-The CLI works through the following flow:
+`sbs` is a single Go executable that links restish in as a library. There is no subprocess, nothing to find on `PATH`, and nothing unpacked at startup.
 
-1. **Auto-configuration**: On first run, the CLI:
-   - Creates `~/.config/restish/apis.json`
-   - Registers the API with the OpenAPI spec URL
-   - Syncs the spec to generate commands
+The source lives in `client/go`:
 
-2. **Command delegation**: All commands are passed to `restish`:
-   ```
-   sbs list-tools → restish sbs list-tools
-   ```
+| Path | Contents |
+| --- | --- |
+| `client/go/cli/` | The implementation (`package cli`) |
+| `client/go/cli/cmd/sbs/` | The binary's entry point (`package main`) |
+| `client/go/tests/` | The Go test suite |
+| `client/go/build.sh` | Cross-compiles every platform (`make cli-dist`) |
 
-3. **Output filtering**: The CLI filters restish output to:
-   - Remove generic "Global Flags" section
-   - Add custom help text
-   - Show current connection URL
+Build it with `make cli-build` (this platform) or `make cli-dist` (all five). The
+library/entry-point split is required rather than stylistic: Go cannot import a
+`package main`, so the tests can only live in their own directory if the
+implementation is an importable package.
+
+1. **Compiled-in target**: the binary carries the store URL it was built or prepared for. Resolution order is user config (`sbs connect`) → `SBS_URL` → the compiled-in URL.
+
+2. **Generated commands**: on first use it fetches `/openapi.json` and caches it under `~/.cache/sbs/specs`. Operations appear as root commands (`sbs list-skills`), so the command surface tracks the store automatically.
+
+3. **On-demand authentication**: requests go out unauthenticated first. If the store answers `401`, the CLI prompts once, exchanges the credentials at `POST /auth/login`, and caches the bearer token in `~/.config/sbs/tokens.cbor`. Public endpoints never prompt, and credentials never appear on the command line.
+
+4. **Support commands** live under `sbs cli`: `sbs cli doctor`, `sbs cli config path`, `sbs cli cache clear`, `sbs cli auth inspect`.
+
+### Environment variables
+
+| Variable | Meaning |
+| --- | --- |
+| `SBS_URL` | Override the store URL for one invocation |
+| `SBS_TOKEN` | Use a bearer token instead of prompting (CI). Select with `-p env-token` |
 
 ## Troubleshooting
 
 ### CLI not found after installation
 
-Ensure the Python scripts directory is in your PATH:
+Put the binary somewhere on your PATH, or add its directory:
 
 ```bash
 # Linux/macOS
-export PATH="$HOME/.local/bin:$PATH"
+mv sbs ~/.local/bin/ && export PATH="$HOME/.local/bin:$PATH"
 
 # Windows
-# Add %APPDATA%\Python\Scripts to your PATH
+# Add the directory holding sbs.exe to your PATH
 ```
 
-### Restish not installed
+### `pip install skillberry-store-sdk` no longer gives me `sbs`
 
-Follow the installation instructions provided by the CLI or visit [restish documentation](https://rest.sh/).
+That is deliberate. Install `skillberry-store-cli` (or `skillberry-store-sdk[cli]`), or download the binary from a store — see [Installation](#installation).
+
+### "could not load the API description from ..."
+
+The CLI could not reach the store's `/openapi.json`. It prints the URL it tried. Either the store is not running, or the binary is pointed at the wrong one:
+
+```bash
+sbs connect http://localhost:8000     # repoint permanently
+SBS_URL=http://localhost:8000 sbs list-skills   # just this once
+sbs cli doctor                        # show what is currently configured
+```
+
+`sbs connect` and `sbs download-cli` work even when the store is unreachable — they do not need the spec.
 
 ### Connection refused
 
@@ -294,12 +385,16 @@ make run
 
 ### API spec sync failed
 
-Manually sync the API spec by clearing the cache and re-running any command:
+Clear the cached spec and re-run any command:
 
 ```bash
-rm ~/.cache/restish/sbs.cbor
+sbs cli cache clear
 sbs --help
 ```
+
+### `sbs` mentions "Restish" in a couple of flag descriptions
+
+Two inherited global flag descriptions (`--help-all`, `--rsh-config`) and `sbs cli doctor`'s version label still name the embedded engine. They have no configuration hook upstream yet; a patch is in progress. Everything else — usage, examples, errors, hints and paths — says `sbs`.
 
 ## Examples
 

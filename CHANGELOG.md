@@ -10,6 +10,74 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **`sbs` is now a native single-file executable, downloadable from any running
+  store.** No Python, no `pip`, no separate `restish` install, nothing unpacked at
+  startup — one static binary per platform (~32 MB), pre-configured with the URL of
+  the store it came from.
+
+  ```bash
+  curl -fsSL "https://store.example.com/cli/download?platform=linux-amd64" -o sbs
+  chmod +x sbs
+  ./sbs list-skills          # works immediately; no `connect`
+  ```
+
+  Five platforms are supported — `linux-amd64`, `linux-arm64`, `darwin-amd64`,
+  `darwin-arm64`, `windows-amd64` — all cross-compiled from one Linux host.
+
+  **One new endpoint**, unauthenticated in every ACL mode so the download works
+  from a browser, `curl`, CI and the CLI itself without a session:
+
+  | Method | Path | Answer |
+  | --- | --- | --- |
+  | `GET`, `HEAD` | `/cli/download` | The executable. `?platform=<goos>-<goarch>`, `?format=raw\|archive` |
+
+  Which artifact you get is a query argument, so there is one route, one cache key
+  shape and one thing to allow-list. The response carries the artifact's identity
+  in headers — `X-SBS-SHA256` (hex, comparable straight against `sha256sum`),
+  `X-SBS-CLI-Version`, `X-SBS-CLI-Platform` — so a `HEAD` reveals the digest and
+  size **without** transferring ~32 MB, and a `GET` carries the digest alongside
+  the bytes it describes.
+
+  It is reachable in every mode because it is one of the built-in
+  `unauthenticated_paths` defaults, alongside `/health` and the auth endpoints, and
+  a config file's own list now **adds to** those defaults instead of replacing
+  them. That also fixes an existing footgun: an operator with a custom list had
+  silently lost `/health`, `/health/ready`, `/openapi.json` and `/docs`, so liveness
+  probes and the API docs demanded a bearer token with nothing in the log to say
+  why.
+
+  **New CLI verbs:** `sbs download-cli [--platform] [--output] [--format]` and
+  `sbs self-update`, both verifying the published sha256 before writing anything.
+  Both work even when the store's spec is unreachable, which is when you need them.
+
+  **New UI:** a **Download CLI** button in the masthead, a card on the home page,
+  and a link on the sign-in screen — the last because a user who cannot sign in yet
+  is exactly the user who wants the CLI. The expected checksum sits behind a
+  "Verify this download" disclosure rather than beside the button.
+
+  **One new setting**, `SBS_CLI_DOWNLOAD` (`on`/`off`), which unregisters the route
+  entirely when off. Everything else is derived: the artifact directories are fixed
+  beside the CLI source, the URL-injection mechanism follows from the platform and
+  from whether a Go toolchain is present, and the concurrency cap is fixed.
+  `SBS_PUBLIC_URL` is what gets baked into the artifacts. Client-side: `SBS_URL`
+  and `SBS_TOKEN`.
+
+  Preparing a per-URL artifact at server start is **idempotent and off the critical
+  path**: it runs as a background task, is stamped on
+  `(public_url, cli_commit, engine_version, platform, mechanism)` so an unchanged
+  `SBS_PUBLIC_URL` does no work at all, and `/health/ready` deliberately does not
+  gate on it. No Go toolchain is required — four of the five platforms are prepared
+  by rewriting a fixed-width URL slot inside a CI-built artifact in place, which
+  needs no compiler.
+
+  restish is linked into the binaries, so its MIT licence is reproduced in this
+  repository's `LICENSE` under *Third-party software notices*, and `sbs --version`
+  points at it.
+
+  The binaries are **not code-signed**, so a browser download on macOS is
+  quarantined (a `curl` download is not) and Windows SmartScreen may warn. See
+  `docs/cli.md`; design in `docs/design/new_cli.md`.
+
 - **`npx skills add` support.** A skill in a running store installs into Claude
   Code, Cursor, Codex and ~70 other agents with one copy-pasted command and no
   prior setup — no `npm install`, no CLI on the PATH, no git credentials, no
@@ -196,6 +264,48 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `docs/design/login-banner.md`.
 
 ### Breaking
+
+- **The sbs console script is gone from the Python SDK.**
+  `pip install skillberry-store-sdk` no longer installs `sbs`. It is now a native
+  single-file executable, and there is exactly one implementation of it. The Python
+  shim that `make generate-sdk` used to inject into the generated SDK
+  (`skillberry_store_sdk/sdk_cli.py`) has been **deleted**.
+
+  If you install the SDK for the CLI, switch to one of:
+
+  ```bash
+  pip install skillberry-store-cli            # platform wheel carrying the binary
+  pip install 'skillberry-store-sdk[cli]'     # the SDK plus that wheel
+  curl -fsSL "https://store.example.com/cli/download?platform=linux-amd64" -o sbs   # from a store
+  ```
+
+  Nothing is withdrawn: the last SDK release carrying the shim stays installable,
+  so a pinned CI job keeps working and the fix is one line.
+
+  **Why.** The shim delegated with `os.execvp("restish", ...)`, which replaced the
+  process — so it never saw restish's output and could not brand any of it. Users
+  read `restish sbs list-skills` in help, error messages and hints, and those
+  strings are not commands that work when typed. It also required a **separate
+  manual `restish` install** on `PATH`, which users hit before reaching the tool
+  at all. The native CLI embeds restish as a Go *library*, so the command name,
+  root description, config paths and auth handler are configuration rather than
+  text to rewrite, and generated operations sit at the root (`sbs list-skills`,
+  not `sbs sbs list-skills`).
+
+  **What you gain:** one static binary with no Python and no `pip`; no separate
+  REST client to install; a binary downloaded from a store already points at that
+  store; and `sbs login` / `sbs list-skills` work on a fresh install with no
+  `connect` step. Config moves from `~/.config/restish/restish.json` to
+  `~/.config/sbs/sbs.json` — your existing `apis.sbs` entry is copied over once,
+  automatically, and the old file is left untouched.
+
+  The generated **SDK itself is unchanged and remains a pure Python library** that
+  installs anywhere; it simply stops declaring a console script. Details in
+  `docs/cli.md` and `docs/design/new_cli.md`.
+
+  For other assets in the shared `skillberry-common` subtree: shim generation is
+  now gated behind `SDK_PY_CLI`, which **defaults to `1`**, so nothing changes for
+  them. This asset sets `SDK_PY_CLI := 0` in `.mk/local.mk`.
 
 - **Every plugin API route must now declare `@requires(resource, verb)`.** The startup
   RBAC coverage audit could not see plugin routes at all: FastAPI >= 0.137 nests

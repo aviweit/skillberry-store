@@ -1,0 +1,64 @@
+# The `skillberry-store-cli` distribution: platform wheels carrying the native
+# `sbs` binary (docs/design/new_cli.md §4.6, G5).
+#
+# A Go binary cannot be a `pip` console script, so the wheel carries the binary
+# as package data plus a launcher that execv's it — the same pattern `ruff`, `uv`
+# and `esbuild` use. One wheel is built per platform by
+# packaging/skillberry-store-cli/build_wheels.py, each tagged with the
+# corresponding platform tag so `pip` resolves the right one automatically.
+#
+# Deliberately a *separate* distribution from `skillberry-store-sdk`: the SDK is
+# a pure-Python library and must install anywhere, including on platforms we
+# publish no binary for. `skillberry-store-sdk[cli]` depends on this one behind
+# environment markers, so the documented install line stays close to what users
+# type today.
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "skillberry-store-cli"
+# Kept in step with the Go binary's version by build_wheels.py, which rewrites
+# this field from the prebuilt manifest. A mismatch would let `pip show` and
+# `sbs --version` disagree, which is the first thing a bug report quotes.
+version = "0.0.0"
+description = "The native sbs command-line interface for Skillberry Store"
+readme = "README.md"
+requires-python = ">=3.8"
+license = { text = "Apache-2.0" }
+keywords = ["skillberry", "cli", "sbs"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Environment :: Console",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: Apache Software License",
+  # No "Programming Language :: Python" beyond the launcher: the actual program
+  # is a static Go binary, and the Python floor is only what the three-line
+  # launcher needs.
+  "Programming Language :: Python :: 3",
+  "Topic :: Software Development :: Libraries",
+]
+# No dependencies at all, on purpose: this wheel exists to deliver one static
+# binary, and anything it pulled in would be a dependency conflict waiting to
+# happen in someone else's environment.
+dependencies = []
+
+[project.scripts]
+sbs = "skillberry_store_cli.launcher:main"
+
+[project.urls]
+Homepage = "https://github.com/skillberry-ai/skillberry-store"
+Documentation = "https://github.com/skillberry-ai/skillberry-store/blob/main/docs/cli.md"
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+# The binary is data, not code, and must survive the wheel build with its name
+# intact.
+include-package-data = true
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+skillberry_store_cli = ["bin/sbs", "bin/sbs.exe", "bin/LICENSE.restish"]

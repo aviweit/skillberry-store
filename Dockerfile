@@ -43,6 +43,13 @@ ENV BUILD_VERSION=$BUILD_VERSION \
 # Copy the application
 COPY . .
 
+# Guarantee the native CLI artifact directory exists, so the runtime stage's
+# unconditional COPY of it is always valid (see the note there). It is present
+# and populated when the build context carries cli-prebuilt/ — which is
+# gitignored, so it only appears when someone has run `make cli-dist` or
+# downloaded the release artifacts — and empty otherwise.
+RUN mkdir -p $APP_HOME/cli-prebuilt
+
 # Unpack the extra host content staged into the build context by
 # scripts/stage-extra-copy.sh (make docker-build EXTRA_COPY_FILES=<src>:<dst>,...).
 # The staged tree mirrors the absolute target paths, so one recursive unpack
@@ -169,6 +176,32 @@ ENV MALLOC_ARENA_MAX=2
 # Copy entire /app directory from builder stage
 # This includes the application code and the .venv with all installed dependencies
 COPY --from=builder $APP_HOME $APP_HOME
+
+# ---------------------------------------------------------------------------
+# Native `sbs` CLI artifacts (docs/design/new_cli.md §5.4).
+#
+# The store serves its own CLI from GET /cli/download, pre-configured with this
+# deployment's SBS_PUBLIC_URL. At startup it stamps that URL into these
+# CI-built binaries by rewriting a fixed-width slot **in place** -- which is why
+# no Go toolchain is needed in this image (option A, the default).
+#
+# Baking them in costs ~160 MB for five platforms, so it is opt-in per build:
+#
+#   make docker-build CLI_ARTIFACTS_DIR=cli-prebuilt
+#
+# Without it, /cli/manifest truthfully reports every platform as
+# `not_bundled` and the rest of the store is unaffected -- users install via
+# `pip install skillberry-store-cli` instead. Operators who would rather mount
+# the artifacts than bake them can mount a volume over /app/cli-prebuilt, which
+# is the fixed location the store reads; there is no variable to redirect it
+# (R5 -- the directories are derived, not configured).
+#
+# Copied unconditionally from a directory the builder stage always creates. A
+# Dockerfile cannot skip a COPY conditionally, and COPY fails outright on a
+# missing source — including on a wildcard that matches nothing — so "make the
+# source always exist, possibly empty" is the only robust shape. An empty
+# directory yields `not_bundled`, which is the truthful answer.
+COPY --from=builder $APP_HOME/cli-prebuilt /app/cli-prebuilt
 
 # Place the staged extra host content whose targets sit outside $APP_HOME
 # (e.g. /etc/ssl/extra). The builder applied the whole staged tree and pruned

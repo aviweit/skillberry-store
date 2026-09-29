@@ -14,6 +14,14 @@ SERVICE_PORTS := 8000
 SERVICE_PORT_ROLES := MAIN
 SERVICE_HOST := 0.0.0.0
 SERVICE_HAS_SDK := 1
+# The generated SDK is a pure Python *library* and declares no `sbs` console
+# script. `sbs` is a native Go binary that embeds restish as a library
+# (docs/design/new_cli.md); the Python shim that used to be injected here has
+# been deleted, so there is exactly one implementation of the CLI.
+#
+# BREAKING for users: `pip install skillberry-store-sdk` no longer provides
+# `sbs`. See the CHANGELOG entry for `sbs console script` and docs/cli.md.
+SDK_PY_CLI := 0
 # ----------------------------------------------------
 
 include .mk/dev.mk

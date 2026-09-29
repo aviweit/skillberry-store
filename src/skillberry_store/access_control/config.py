@@ -302,7 +302,37 @@ _DEFAULT_UNAUTH_PATHS = [
     # like /pub/*/.well-known/* is inexpressible, so /pub/ MUST remain a
     # dedicated prefix with nothing else ever mounted under it (§5.10 #1).
     "GET /pub/*",
+    # CLI download (docs/design/new_cli.md §5.5). A browser, `curl`, CI or a
+    # freshly downloaded binary has no token to offer, and a user who cannot sign
+    # in yet is exactly the user who wants the CLI. The surface serves no tenant
+    # data, no configuration and no login message, and accepts no request body.
+    # HEAD is listed alongside GET because the route serves both — the audit
+    # requires every method on a route to be allow-listed — and because HEAD is
+    # how a client reads the artifact's sha256 without transferring it.
+    "GET /cli*",
+    "HEAD /cli*",
 ]
+
+
+def _effective_unauth_paths(configured: Optional[List[str]]) -> List[str]:
+    """The allow-list the PEP enforces: the built-in defaults plus the config's.
+
+    ``unauthenticated_paths`` in the config file **adds to** the defaults above;
+    it does not replace them. That is what makes the defaults a dependable floor:
+    every entry in them is either a probe that must answer before anyone can
+    authenticate, an authentication endpoint itself, or a public read surface, and
+    a deployment that lost one would be unable to boot, unable to log in, or
+    unable to serve its own docs.
+
+    Order is preserved with the defaults first, and duplicates are collapsed, so
+    a config file that re-lists a default (all three shipped files do) is
+    idempotent rather than additive.
+    """
+    merged: List[str] = []
+    for entry in list(_DEFAULT_UNAUTH_PATHS) + list(configured or []):
+        if entry not in merged:
+            merged.append(entry)
+    return merged
 
 
 def _resolve_config_path(path: Optional[str]) -> str:
@@ -370,7 +400,7 @@ def load_config(path: Optional[str] = None) -> AccessControlConfig:
         )
         return AccessControlConfig(
             mode="disabled",
-            unauthenticated_paths=list(_DEFAULT_UNAUTH_PATHS),
+            unauthenticated_paths=_effective_unauth_paths(None),
         )
 
     try:
@@ -399,7 +429,19 @@ def load_config(path: Optional[str] = None) -> AccessControlConfig:
             f"Unknown access-control mode '{mode}' (valid: {sorted(VALID_MODES)})"
         )
 
-    unauth_paths = list(raw.get("unauthenticated_paths") or _DEFAULT_UNAUTH_PATHS)
+    configured = raw.get("unauthenticated_paths")
+    unauth_paths = _effective_unauth_paths(configured)
+    extra = [
+        entry for entry in (configured or []) if entry not in _DEFAULT_UNAUTH_PATHS
+    ]
+    if extra:
+        logger.info(
+            "Access-control: %s adds %d unauthenticated path pattern(s) beyond "
+            "the defaults: %s",
+            cfg_path,
+            len(extra),
+            ", ".join(extra),
+        )
     npx_publish = _coerce_npx_publish(raw.get("npx_publish"), cfg_path)
 
     standalone = raw.get("standalone") or {}

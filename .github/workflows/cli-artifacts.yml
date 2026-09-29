@@ -1,0 +1,534 @@
+# ============================================================================
+# Build, execute and probe the native `sbs` CLI artifacts.
+#
+# docs/design/new_cli.md §5.10. The shape of this workflow is the payoff from
+# embedding restish as a Go library: because Go cross-compiles with
+# CGO_ENABLED=0, ONE ubuntu runner builds all five platforms. The superseded
+# PyInstaller design needed five native runners for the same matrix, and could
+# never have produced a per-URL artifact at server start at all.
+#
+# The per-OS runners are used only for what genuinely needs the OS — *executing*
+# the artifact. That is where the Feature A regression gate lives: asserting on
+# the real binary's help output, on every platform, that "restish" appears
+# nowhere outside the four known strings of §3.3.
+# ============================================================================
+
+name: CLI artifacts
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'client/go/**'
+      - '.github/workflows/cli-artifacts.yml'
+  pull_request:
+    paths:
+      - 'client/go/**'
+      - '.github/workflows/cli-artifacts.yml'
+  # Release builds: the same artifacts the image bakes in.
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  # Must match client/go/cli/version.go's SlotWidth and the Python
+  # services/cli_artifacts.py SLOT_WIDTH. A test asserts the first two agree.
+  SLOT_WIDTH: '60'
+
+jobs:
+  # --------------------------------------------------------------------------
+  # 1. Cross-compile every platform from one Linux runner.
+  # --------------------------------------------------------------------------
+  build:
+    name: Build all platforms
+    runs-on: ubuntu-latest
+    outputs:
+      cli-version: ${{ steps.build.outputs.cli-version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # The version comes from the module's own `go` directive, so there is no
+      # second place that has to agree with it.
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: client/go/go.mod
+          cache-dependency-path: client/go/go.sum
+
+      # go.sum pins every module by hash, so this is the reproducibility
+      # guarantee — `make cli-vendor` exists for air-gapped builds but the
+      # vendor tree is deliberately not committed (44 MB / 2248 files measured).
+      - name: Verify the dependency graph is unchanged
+        working-directory: client/go
+        run: go mod verify
+
+      # Through the make targets, so CI exercises the same toolchain resolution
+      # and the same flags a developer gets locally -- a makefile that stopped
+      # finding Go would fail here rather than silently skipping.
+      - name: Report the toolchain
+        run: make cli-toolchain
+
+      - name: Format, vet and test
+        run: make cli-fmt-check cli-vet cli-test
+
+      - name: Cross-compile all five platforms
+        id: build
+        run: |
+          ./client/go/build.sh --out cli-prebuilt
+          echo "cli-version=$(python3 -c "
+          import json
+          print(json.load(open('cli-prebuilt/prebuilt-manifest.json'))['cli_version'])
+          ")" >> "$GITHUB_OUTPUT"
+
+      - name: Show what was built
+        run: |
+          cat cli-prebuilt/prebuilt-manifest.json
+          find cli-prebuilt -type f -exec ls -la {} +
+
+      # Every artifact must carry a patchable slot, or the server's default
+      # `patch` mechanism silently has nothing to rewrite and every platform
+      # reports `no_slot_found` at runtime.
+      - name: Assert every artifact carries the URL slot
+        run: |
+          python3 - <<'PY'
+          import json, pathlib, sys
+          root = pathlib.Path("cli-prebuilt")
+          manifest = json.loads((root / "prebuilt-manifest.json").read_text())
+          slot = b"http://localhost:8000" + b"#" * (60 - len("http://localhost:8000"))
+          failed = []
+          for art in manifest["artifacts"]:
+              path = root / art["platform"] / art["filename"]
+              count = path.read_bytes().count(slot)
+              print(f"{art['platform']}: {count} slot(s)")
+              if count == 0:
+                  failed.append(art["platform"])
+          if failed:
+              sys.exit(f"no URL slot found in: {failed}")
+          PY
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cli-prebuilt
+          path: cli-prebuilt/
+          retention-days: 14
+
+  # --------------------------------------------------------------------------
+  # 2. Execute each artifact on its own OS, and gate on the branding.
+  # --------------------------------------------------------------------------
+  execute:
+    name: Run ${{ matrix.platform }} on ${{ matrix.runner }}
+    needs: build
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # darwin-amd64 needs a genuine x86_64 macOS host, which since the
+          # macos-13 retirement (2025-12-04) means macos-15-intel -- the arm64
+          # images would exercise Rosetta instead of the real target. That label is
+          # itself scheduled for retirement in August 2027; a job that queues
+          # forever rather than failing is the symptom of it going away.
+          - { platform: linux-amd64, runner: ubuntu-latest, exe: sbs }
+          - { platform: linux-arm64, runner: ubuntu-24.04-arm, exe: sbs }
+          - { platform: darwin-amd64, runner: macos-15-intel, exe: sbs }
+          - { platform: darwin-arm64, runner: macos-14, exe: sbs }
+          - { platform: windows-amd64, runner: windows-latest, exe: sbs.exe }
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: cli-prebuilt
+          path: cli-prebuilt
+
+      - name: Make it executable
+        if: runner.os != 'Windows'
+        run: chmod +x "cli-prebuilt/${{ matrix.platform }}/${{ matrix.exe }}"
+
+      - name: sbs --version
+        shell: bash
+        run: |
+          out="$(cli-prebuilt/${{ matrix.platform }}/${{ matrix.exe }} --version)"
+          echo "$out"
+          # Branded, and carrying the engine version for bug reports.
+          echo "$out" | grep -q '^sbs version ' || {
+            echo "::error::--version is not branded: $out"; exit 1; }
+
+      # The branding regression gate (§8.1 #6, §5.10 step 2), on the real
+      # binary, on every OS. Help is exercised with an unreachable store, which
+      # is the state a freshly downloaded artifact is in before it can reach
+      # one — and the state in which the surface used to silently revert to
+      # stock restish.
+      - name: Assert no unexpected "restish" in user-visible output
+        shell: bash
+        run: |
+          export HOME="${{ runner.temp }}/sbs-home"
+          mkdir -p "$HOME"
+          bin="cli-prebuilt/${{ matrix.platform }}/${{ matrix.exe }}"
+
+          # Collected with stdin closed: an interactive prompt would otherwise
+          # hang the job rather than fail it.
+          { "$bin" --version || true
+            "$bin" --help || true
+            "$bin" cli doctor || true
+            "$bin" cli config path || true
+            "$bin" definitely-not-a-command || true
+          } < /dev/null > /tmp/surfaces.txt 2>&1 || true
+
+          cat /tmp/surfaces.txt
+
+          # The §3.3 inventory, plus the engine version we emit on purpose. Kept
+          # in step with ALLOWED_RESTISH_SUBSTRINGS in
+          # src/skillberry_store/tests/cli/test_native_cli_e2e.py and
+          # knownRestishStrings in client/go/tests/main_test.go.
+          #
+          # $HOME is scrubbed first: the runner's own temp path can contain
+          # anything, and a path is not the CLI's vocabulary.
+          sed "s#$HOME#<home>#g" /tmp/surfaces.txt \
+            | grep -i restish \
+            | grep -v -- '--help-all' \
+            | grep -v -- '--rsh-config' \
+            | grep -v 'Restish version:' \
+            | grep -v 'restish shell setup' \
+            | grep -v 'engine: restish' \
+            | grep -v 'Embeds restish' \
+            > /tmp/offenders.txt || true
+
+          if [ -s /tmp/offenders.txt ]; then
+            echo "::error::unexpected 'restish' in user-visible output:"
+            cat /tmp/offenders.txt
+            exit 1
+          fi
+          echo "OK: no unexpected restish mentions"
+
+      # The stock restish surface must never appear: it does when the config
+      # load fails, which is exactly the bug ensureConfigFile exists to prevent
+      # (a missing RSH_CONFIG file made the whole branded surface revert, with a
+      # zero exit status).
+      # No store is reachable from this job, and a promoted API fetches the
+      # store's spec before it can build any command — so `--help` here is the
+      # branded spec-discovery failure, not a command list. Two things are
+      # assertable in that state, and both matter:
+      #
+      #  * no stock restish command appears. A missing config file makes restish
+      #    fail its whole config load, which drops the binary back to the full
+      #    stock surface (`api`, `plugin`, `cert`, …) with a zero exit status —
+      #    silently undoing every branding guarantee.
+      #  * the failure names the configured URL and the ways to change it, which
+      #    is the first thing a freshly downloaded binary does before it can
+      #    reach a store (§G3).
+      #
+      # That the promoted surface renders correctly *with* a store needs a store,
+      # so it is asserted in the smoke job below.
+      - name: Assert the offline failure is branded and complete
+        shell: bash
+        run: |
+          export HOME="${{ runner.temp }}/sbs-home2"
+          mkdir -p "$HOME"
+          bin="cli-prebuilt/${{ matrix.platform }}/${{ matrix.exe }}"
+          "$bin" --help < /dev/null > /tmp/help.txt 2>&1 || true
+          cat /tmp/help.txt
+
+          for stock in 'api ' 'plugin ' 'cert ' 'links ' 'edit '; do
+            if grep -qE "^\s+${stock}" /tmp/help.txt; then
+              echo "::error::stock restish command '${stock}' leaked into the surface"
+              exit 1
+            fi
+          done
+
+          for expected in 'sbs connect' 'SBS_URL' 'sbs download-cli'; do
+            grep -qF "$expected" /tmp/help.txt || {
+              echo "::error::the offline failure does not offer '$expected'"
+              exit 1; }
+          done
+          echo "OK: offline failure is branded and actionable"
+
+  # --------------------------------------------------------------------------
+  # 3. Mechanism probe: does in-place slot patching survive on this platform?
+  #
+  # This decides `patch` vs `sidecar` per platform (§5.2) by measurement rather
+  # than by an assumption in the design document. darwin-arm64 is expected to
+  # FAIL, because Go's linker ad-hoc signs that target and rewriting bytes inside
+  # the signed image voids the signature — so its failure is recorded, not an
+  # error.
+  # --------------------------------------------------------------------------
+  probe-patch:
+    name: Probe patching on ${{ matrix.platform }}
+    needs: build
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { platform: linux-amd64, runner: ubuntu-latest, exe: sbs, expect: patch }
+          - { platform: linux-arm64, runner: ubuntu-24.04-arm, exe: sbs, expect: patch }
+          - { platform: darwin-amd64, runner: macos-15-intel, exe: sbs, expect: unknown }
+          - { platform: darwin-arm64, runner: macos-14, exe: sbs, expect: sidecar }
+          - { platform: windows-amd64, runner: windows-latest, exe: sbs.exe, expect: patch }
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: cli-prebuilt
+          path: cli-prebuilt
+
+      - name: Patch the slot and check the binary still reports the new URL
+        id: probe
+        shell: bash
+        continue-on-error: true
+        run: |
+          bin="cli-prebuilt/${{ matrix.platform }}/${{ matrix.exe }}"
+          python3 - "$bin" <<'PY'
+          import sys, pathlib
+          path = pathlib.Path(sys.argv[1])
+          data = bytearray(path.read_bytes())
+          before = len(data)
+          slot = b"http://localhost:8000" + b"#" * (60 - len("http://localhost:8000"))
+          new = b"http://patched.example:9999"
+          padded = new + b"#" * (60 - len(new))
+          n, start = 0, 0
+          while (i := data.find(slot, start)) >= 0:
+              data[i:i + 60] = padded
+              n += 1
+              start = i + 60
+          assert n > 0, "no slot found"
+          assert len(data) == before, "patching changed the file size"
+          path.write_bytes(bytes(data))
+          print(f"patched {n} slot(s), size delta 0")
+          PY
+
+          if [ "${{ runner.os }}" != "Windows" ]; then chmod +x "$bin"; fi
+
+          # The patched binary must RUN and report the injected URL. Pointed at a
+          # host that does not resolve, so the expected outcome is a
+          # spec-discovery failure naming patched.example — which proves the URL
+          # took effect. A crash or a missing URL means patching broke the image.
+          export HOME="${{ runner.temp }}/probe-home"
+          mkdir -p "$HOME"
+          "$bin" list-skills < /dev/null > /tmp/probe.txt 2>&1 || true
+          cat /tmp/probe.txt
+
+          if grep -q 'patched.example:9999' /tmp/probe.txt; then
+            echo "verdict=patch" >> "$GITHUB_OUTPUT"
+            echo "OK: the patched binary runs and uses the injected URL"
+          else
+            echo "verdict=sidecar" >> "$GITHUB_OUTPUT"
+            echo "::warning::patching this platform does not survive; sidecar required"
+            exit 1
+          fi
+
+      - name: Record the verdict
+        shell: bash
+        run: |
+          verdict='${{ steps.probe.outputs.verdict }}'
+          expected='${{ matrix.expect }}'
+          echo "platform=${{ matrix.platform }} verdict=${verdict:-sidecar} expected=$expected"
+
+          # Only `patch`-expected platforms are a hard gate. darwin-arm64 is
+          # expected to fail, and darwin-amd64 is the cell the design left for
+          # this probe to decide.
+          if [ "$expected" = "patch" ] && [ "$verdict" != "patch" ]; then
+            echo "::error::${{ matrix.platform }} was expected to tolerate patching but did not."
+            echo "Set its mechanism to sidecar in services/cli_artifacts.py::_choose_mechanism."
+            exit 1
+          fi
+          echo "${{ matrix.platform }}: ${verdict:-sidecar}" >> "$GITHUB_STEP_SUMMARY"
+
+  # --------------------------------------------------------------------------
+  # 4. Smoke test the whole loop against a real store.
+  # --------------------------------------------------------------------------
+  smoke:
+    name: End-to-end against a running store
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      # Straight into the fixed location the store reads: the artifact
+      # directories are not configurable, so there is nothing to point at them.
+      # That location is the build's own output directory, so this unpacks the
+      # artifact where it was produced rather than relocating it -- when those
+      # two disagreed, this job was the only thing bridging the gap and a local
+      # `make cli-dist` served nothing.
+      - uses: actions/download-artifact@v4
+        with:
+          name: cli-prebuilt
+          path: cli-prebuilt
+
+      - name: Install the store
+        run: |
+          python -m venv venv
+          ./venv/bin/pip install -q -e .
+
+      - name: Start the store
+        run: |
+          ls -la cli-prebuilt
+          SBS_PORT=8123 \
+          SBS_PUBLIC_URL=http://127.0.0.1:8123 \
+          nohup ./venv/bin/python -m skillberry_store.main > /tmp/store.log 2>&1 &
+          for i in $(seq 1 60); do
+            curl -sf http://127.0.0.1:8123/health >/dev/null && break
+            sleep 2
+          done
+          curl -sf http://127.0.0.1:8123/health || { tail -50 /tmp/store.log; exit 1; }
+
+      # A HEAD answers 200 once a platform is ready, 503 while it is being
+      # prepared — so availability is read from the status, not from a document.
+      #
+      # Waits for EVERY platform, not just the one the later steps download.
+      # Preparation walks the platforms in order, so linux-amd64 goes ready while
+      # the rest are still being stamped; proceeding then would race the steps
+      # below against work still in flight.
+      - name: Wait for every platform to be prepared
+        run: |
+          base='http://127.0.0.1:8123/cli/download'
+          for platform in linux-amd64 linux-arm64 darwin-amd64 darwin-arm64 windows-amd64; do
+            for i in $(seq 1 90); do
+              code=$(curl -s -o /dev/null -w '%{http_code}' -I "$base?platform=$platform")
+              [ "$code" = "200" ] && break
+              sleep 2
+            done
+            echo "$platform: HTTP $code"
+            [ "$code" = "200" ] || {
+              echo "::error::$platform never became ready"
+              tail -40 /tmp/store.log; exit 1; }
+          done
+          curl -sI "$base?platform=linux-amd64" | grep -i 'x-sbs-'
+
+      - name: Download and verify against the published digest
+        run: |
+          url='http://127.0.0.1:8123/cli/download?platform=linux-amd64'
+          mkdir -p /tmp/bin
+          # The digest comes from the same response that carries the bytes, so
+          # there is no window in which the two could describe different files.
+          expected=$(curl -fsSL -D /tmp/headers "$url" -o /tmp/bin/sbs \
+            && tr -d '\r' < /tmp/headers | awk 'tolower($1)=="x-sbs-sha256:"{print $2}')
+          actual=$(sha256sum /tmp/bin/sbs | cut -d' ' -f1)
+          echo "published $expected"
+          echo "computed  $actual"
+          test -n "$expected" || { echo "::error::no X-SBS-SHA256 header"; exit 1; }
+          test "$expected" = "$actual" || { echo "::error::digest mismatch"; exit 1; }
+          chmod +x /tmp/bin/sbs
+
+      - name: The installed binary talks to the store with zero configuration
+        run: |
+          export HOME=/tmp/clean-home
+          mkdir -p "$HOME"
+          /tmp/bin/sbs list-skills < /dev/null
+          # Must be JSON: `sbs list-skills | jq` is an explicit goal.
+          /tmp/bin/sbs list-skills < /dev/null | python3 -c 'import sys,json;json.load(sys.stdin)'
+
+      # The half that needs a reachable store: with the spec fetched, the root
+      # command list is the store's own operations and the support commands sit
+      # under the branded `cli` namespace.
+      - name: The promoted surface renders against a live store
+        run: |
+          export HOME=/tmp/clean-home
+          mkdir -p "$HOME"
+          SBS_URL=http://127.0.0.1:8123 /tmp/bin/sbs --help < /dev/null > /tmp/help.txt 2>&1
+          cat /tmp/help.txt
+
+          for op in list-skills get-skill list-tools; do
+            grep -qE "^\s+${op}\b" /tmp/help.txt || {
+              echo "::error::${op} is not a root command"; exit 1; }
+          done
+          grep -qE '^\s+cli\b' /tmp/help.txt || {
+            echo "::error::the branded 'cli' support namespace is missing"; exit 1; }
+          # The shape a renamed wrapper would print, and the reason this design exists.
+          grep -q 'sbs sbs ' /tmp/help.txt && {
+            echo "::error::doubled command name in help"; exit 1; }
+          echo "OK: operations at the root, support commands namespaced"
+
+      - name: The CLI downloads the CLI, and the result runs
+        run: |
+          export HOME=/tmp/clean-home
+          /tmp/bin/sbs download-cli --output /tmp/bin/sbs-downloaded < /dev/null
+          test -x /tmp/bin/sbs-downloaded
+          export HOME=/tmp/clean-home-2
+          mkdir -p "$HOME"
+          /tmp/bin/sbs-downloaded list-skills < /dev/null
+
+      - name: HEAD reports the digest without transferring the artifact
+        run: |
+          url='http://127.0.0.1:8123/cli/download?platform=linux-amd64'
+          curl -sI "$url" -o /tmp/head.txt
+          tr -d '\r' < /tmp/head.txt | grep -i 'x-sbs-sha256' \
+            || { echo "::error::HEAD carries no digest"; exit 1; }
+          # A HEAD must have no body at all, or it is not cheaper than a GET.
+          body=$(curl -sI "$url" | wc -c)
+          full=$(curl -s "$url" | wc -c)
+          test "$body" -lt "$full" || { echo "::error::HEAD returned a body"; exit 1; }
+          echo "OK"
+
+      - name: The archive variant carries the licence notice
+        run: |
+          curl -fsSL 'http://127.0.0.1:8123/cli/download?platform=linux-amd64&format=archive' \
+            -o /tmp/sbs.tar.gz
+          tar -tzf /tmp/sbs.tar.gz | tee /tmp/arc.txt
+          grep -q '^sbs$' /tmp/arc.txt || { echo "::error::no binary in the archive"; exit 1; }
+          grep -q 'LICENSE.restish' /tmp/arc.txt \
+            || { echo "::error::the archive omits the engine licence"; exit 1; }
+
+      - name: Refusals behave as documented
+        run: |
+          code=$(curl -s -o /dev/null -w '%{http_code}' \
+            'http://127.0.0.1:8123/cli/download?platform=../../etc/passwd')
+          test "$code" = "400" || { echo "traversal attempt returned $code, want 400"; exit 1; }
+
+          code=$(curl -s -o /dev/null -w '%{http_code}' \
+            'http://127.0.0.1:8123/cli/download?platform=plan9-mips')
+          test "$code" = "400" || { echo "unknown platform returned $code, want 400"; exit 1; }
+          echo "OK"
+
+      - name: Upload the store log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-store-log
+          path: /tmp/store.log
+
+  # --------------------------------------------------------------------------
+  # 5. Publish on a release. The image build consumes the same manifest.
+  # --------------------------------------------------------------------------
+  publish:
+    name: Attach artifacts to the release
+    if: github.event_name == 'release'
+    needs: [build, execute, smoke]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: cli-prebuilt
+          path: cli-prebuilt
+
+      - name: Package per platform
+        run: |
+          cd cli-prebuilt
+          for dir in */; do
+            platform="${dir%/}"
+            [ -d "$platform" ] || continue
+            cp LICENSE.restish "$platform/" 2>/dev/null || true
+            case "$platform" in
+              windows-*) (cd "$platform" && zip -q "../sbs-$platform.zip" *) ;;
+              *)         tar -czf "sbs-$platform.tar.gz" -C "$platform" . ;;
+            esac
+          done
+          sha256sum sbs-*.tar.gz sbs-*.zip > SHA256SUMS
+          ls -la
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            cli-prebuilt/sbs-*.tar.gz
+            cli-prebuilt/sbs-*.zip
+            cli-prebuilt/SHA256SUMS
+            cli-prebuilt/prebuilt-manifest.json

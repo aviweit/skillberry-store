@@ -53,6 +53,14 @@ unauthenticated_paths:
   # /pub/*/.well-known/* is inexpressible, so /pub/ MUST remain a dedicated
   # prefix with nothing else ever mounted under it (§5.10 #1).
   - GET /pub/*
+  # CLI download (docs/design/new_cli.md §5.5). A browser, `curl`, CI or a
+  # freshly downloaded binary has no token to offer, and a user who cannot sign
+  # in yet is exactly the user who wants the CLI. It serves no tenant data, no
+  # config and no login message, and accepts no request body.
+  # HEAD is listed alongside GET because /cli/download serves both, and because
+  # HEAD is how a client reads the artifact's sha256 without transferring it.
+  - GET /cli*
+  - HEAD /cli*
 
 # --- Mode-specific: standalone only -------------------------------------
 standalone:

@@ -19,9 +19,10 @@ import {
   Button,
   Divider,
 } from '@patternfly/react-core';
-import { BarsIcon, CodeIcon } from '@patternfly/react-icons';
+import { BarsIcon, CodeIcon, DownloadIcon } from '@patternfly/react-icons';
 import { PluginNotifications } from '@/components/PluginNotifications';
 import { UserBadge } from '@/components/UserBadge';
+import { CliDownloadModal } from '@/components/CliDownloadModal';
 
 interface AppLayoutProps {
   children: React.ReactNode;
@@ -35,6 +36,7 @@ export function AppLayout({ children }: AppLayoutProps) {
     }
     return true;
   });
+  const [isCliModalOpen, setIsCliModalOpen] = useState(false);
   const navigate = useNavigate();
   const location = useLocation();
 
@@ -82,7 +84,17 @@ export function AppLayout({ children }: AppLayoutProps) {
         </MastheadBrand>
       </MastheadMain>
       <MastheadContent>
-        <div style={{ marginLeft: 'auto' }}>
+        <div
+          style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: '0.5rem' }}
+        >
+          {/* aria-label, not a visible caption: an icon-only control is otherwise
+              unreachable by screen readers and unfindable by tests. */}
+          <Button
+            variant="plain"
+            aria-label="Download CLI"
+            onClick={() => setIsCliModalOpen(true)}
+            icon={<DownloadIcon />}
+          />
           <UserBadge />
         </div>
       </MastheadContent>
@@ -177,6 +189,10 @@ export function AppLayout({ children }: AppLayoutProps) {
     >
       <PageSection>{children}</PageSection>
       <PluginNotifications />
+      <CliDownloadModal
+        isOpen={isCliModalOpen}
+        onClose={() => setIsCliModalOpen(false)}
+      />
     </Page>
   );
 }

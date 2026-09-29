@@ -31,6 +31,12 @@ from skillberry_store.fast_api.publish_api import (
     NpxPublisher,
     register_publish_api,
 )
+from skillberry_store.fast_api.cli_api import register_cli_api
+from skillberry_store.fast_api.platform_detect import accept_ch_headers
+from skillberry_store.services.cli_artifacts import (
+    CliArtifactService,
+    CliArtifactSettings,
+)
 from skillberry_store.access_control.audit import (
     audit_rbac_coverage,
     stamp_rbac_markers,
@@ -171,6 +177,35 @@ async def _plugin_identity_missing(request, exc: PluginIdentityError):
     return JSONResponse(status_code=500, content={"detail": str(exc)})
 
 
+async def _prepare_cli_artifacts(app: FastAPI) -> None:
+    """Stamp this deployment's public URL into the CLI artifacts, in background.
+
+    docs/design/new_cli.md §5.3. Runs beside the encoder warmup, in a thread
+    executor because the work is file I/O and subprocesses: patching a 32 MB
+    binary and hashing it would block the event loop for tens of milliseconds per
+    platform, and a ``rebuild`` would block it for seconds.
+
+    Failures are logged and downgrade the affected platform's ``state``; they
+    never fail startup. ``/health/ready`` deliberately does not gate on this
+    (§5.3, §8.2 #17) — readiness means "can answer content requests", and a
+    store whose CLI download is not ready yet is fully functional for everything
+    else.
+    """
+    service = getattr(app.state, "cli_artifacts", None)
+    if service is None or not service.settings.enabled:
+        return
+    try:
+        service.load_manifest()
+        # Flip not-yet-ready platforms to `preparing` *before* yielding to the
+        # executor, so a client that polls during startup is told to come back
+        # rather than told the platform is unavailable.
+        service.mark_preparing()
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(None, service.prepare_all)
+    except Exception:
+        logger.exception("CLI artifact preparation failed")
+
+
 @asynccontextmanager
 async def _sbs_lifespan(app: FastAPI):
     """FastAPI lifespan hook — schedules background warmups without blocking startup."""
@@ -179,6 +214,7 @@ async def _sbs_lifespan(app: FastAPI):
     # reference on app.state so the task isn't garbage-collected mid-run.
     _check_vector_db_backend()
     app.state.encoder_warmup_task = asyncio.create_task(_warm_semantic_encoder())
+    app.state.cli_prepare_task = asyncio.create_task(_prepare_cli_artifacts(app))
     yield
 
 
@@ -335,6 +371,24 @@ class SBS(FastAPI):
         # routes carry no @requires marker by design — they are in the ACL
         # unauthenticated allow-list (§4.5).
         register_publish_api(self, publisher=self.state.npx, service=skills_service)
+
+        # CLI distribution (docs/design/new_cli.md §5.5). Construction is cheap
+        # and does no I/O, so it cannot slow or fail startup; the artifacts are
+        # prepared by a background task off the lifespan hook.
+        #
+        # These routes carry no @requires marker by design: they are in the ACL
+        # *mandatory* unauthenticated floor (access_control/config.py
+        # _ALWAYS_UNAUTH_PATHS), so the RBAC audit treats them the way it treats
+        # /health. Unauthenticated in every mode is a requirement, not an
+        # oversight — a browser, curl, CI or a freshly downloaded binary has no
+        # token to offer, and a user who cannot sign in yet is exactly the user
+        # who needs the CLI.
+        self.state.cli_artifacts = CliArtifactService(
+            CliArtifactSettings.from_env(),
+            public_url=self.settings.public_url,
+            cli_commit=__git_version__,
+        )
+        register_cli_api(self, service=self.state.cli_artifacts, tags="cli")
 
         # Translate a refused plugin store operation to HTTP once, on the app,
         # rather than in each of the plugins. A denial is the caller's
@@ -534,6 +588,20 @@ class SBS(FastAPI):
             # Starlette's plain Route, which implies HEAD), so a HEAD would
             # otherwise 405 instead of answering with the cache directives set
             # here.
+            # UA Client Hints have to be *advertised* before a browser sends
+            # them: Sec-CH-UA-Arch and -Bitness are high-entropy hints, withheld
+            # until the origin asks (docs/design/new_cli.md §5.6, B10). Without
+            # them the CLI download modal cannot tell an Apple Silicon Mac from
+            # an Intel one — every Mac User-Agent reports "Intel Mac OS X
+            # 10_15_7" — so it would preselect a guess.
+            #
+            # Critical-CH additionally makes the browser *retry the current
+            # navigation* with the hints attached, rather than sending them only
+            # from the next request onward. Without it the first visit to the UI
+            # would guess and a later visit would be right, which is a confusing
+            # difference to debug.
+            _ACCEPT_CH = accept_ch_headers()
+
             @self.api_route(
                 "/ui/{path:path}", methods=["GET", "HEAD"], include_in_schema=False
             )
@@ -564,15 +632,26 @@ class SBS(FastAPI):
                     injected = login_info_page.response_for_asset(
                         request, asset, cache_control
                     )
-                    return injected or FileResponse(
+                    response = injected or FileResponse(
                         asset, headers={"Cache-Control": cache_control}
                     )
-                return login_info_page.response_for_fallback(
+                    # Only on HTML: the hints matter for the document that runs
+                    # the modal's JavaScript, and attaching Accept-CH to every
+                    # hashed asset would repeat three headers on every request
+                    # for no benefit.
+                    if asset.suffix == ".html":
+                        response.headers.update(_ACCEPT_CH)
+                    return response
+                response = login_info_page.response_for_fallback(
                     request, _INDEX_CACHE_CONTROL
                 ) or FileResponse(
                     ui_root / "index.html",
                     headers={"Cache-Control": _INDEX_CACHE_CONTROL},
                 )
+                # Every SPA deep-link lands here, so this is the path that
+                # actually advertises the hints for a normal page load.
+                response.headers.update(_ACCEPT_CH)
+                return response
 
             # The `{path:path}` route above needs the trailing slash, so the bare
             # prefix gets its own redirect. This used to be the only thing the
