@@ -34,6 +34,10 @@ SHIPPED_YAMLS = (
     "access_control_config.yaml",
     "access_control_config.yaml.standalone",
     "access_control_config.yaml.disabled",
+    # The config demo deployments actually run, and the one most likely to be
+    # behind a platform health check — so it is the one that can least afford to
+    # omit `GET /health`. It was outside this guard until now.
+    "access_control_config.yaml.demo",
 )
 
 # What must be reachable without a session whatever the operator wrote.

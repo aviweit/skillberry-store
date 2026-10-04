@@ -3,13 +3,31 @@
 import logging
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException, Request, UploadFile, File
+from fastapi import FastAPI, Request, UploadFile, File
 from fastapi.responses import PlainTextResponse, StreamingResponse
 
 from skillberry_store.access_control.decorator import requires
 from skillberry_store.services.admin_service import AdminService
 
 logger = logging.getLogger(__name__)
+
+
+def _encoder_warmup_done(app: FastAPI) -> bool:
+    """Whether the background semantic-encoder warmup has finished.
+
+    The task handle is put on ``app.state`` by the lifespan hook. Its absence
+    means no warmup was ever scheduled — a bare ``TestClient(app)`` used
+    without its context manager, or an embedding of the app that does not run
+    startup — which reads as "nothing to wait for", not "never ready".
+
+    Args:
+        app: The FastAPI application serving the request.
+
+    Returns:
+        bool: True when there is no warmup pending.
+    """
+    task = getattr(getattr(app, "state", None), "encoder_warmup_task", None)
+    return task is None or task.done()
 
 
 def register_admin_api(
@@ -144,13 +162,35 @@ def register_admin_api(
         tags=[tags],
         openapi_extra={"x-cli-name": "health"},
     )
-    def health_check():
-        """Health check endpoint.
+    def health_check(request: Request):
+        """Liveness probe — 200 for as long as the process can serve HTTP.
+
+        This is the endpoint an external platform health check should point at:
+        Render's health check path, a Kubernetes ``livenessProbe``, an ALB
+        target group. It answers 200 from the moment the server binds — *while*
+        startup work is still running — and it never raises. A probe that
+        returns 5xx during a normal boot is indistinguishable from a crash, so
+        the platform restarts the instance, and the boot it interrupted never
+        gets to finish. That restart loop is the failure this shape exists to
+        prevent.
+
+        Progress is reported in the body rather than through the status code:
+
+        - ``stage``: ``initializing`` while any startup gate is still open,
+          ``operational`` once they are all closed.
+        - ``checks``: the individual gates, so a slow one can be named.
+        - ``uptime_seconds``: how long this process has been up.
+
+        A client that needs semantic search (the UI) waits for
+        ``stage == "operational"``. A client that only needs to know the process
+        is alive reads nothing but the status code. ``/health/ready`` keeps the
+        stricter, traffic-gating contract.
 
         Returns:
-            dict: Health status of the service.
+            dict: ``status`` (always ``"healthy"``), ``stage``, ``checks``,
+            ``uptime_seconds`` — always with HTTP 200.
         """
-        return {"status": "healthy"}
+        return service.health_report(_encoder_warmup_done(request.app))
 
     @requires("admin", "list")
     @app.get("/changes", tags=[tags], openapi_extra={"x-cli-name": "changes-count"})
@@ -176,25 +216,26 @@ def register_admin_api(
         openapi_extra={"x-cli-name": "health-ready"},
     )
     def readiness_check(request: Request):
-        """Readiness check endpoint - verifies all description stores are initialized.
+        """Readiness probe — 200 only once the store can serve content requests.
+
+        Gates on the description stores and on the semantic encoder warmup.
+        Without the latter, the first request that triggers an embedding races
+        the background warmup and both pay the model cold-load (download + onnx
+        session build) at once.
+
+        Use this to gate *traffic*: a Kubernetes ``readinessProbe``, a load
+        balancer, a test harness waiting before it starts asserting. Do NOT use
+        it as a platform health check — it is non-2xx by design during a normal
+        boot, and a platform that restarts on that will never let the boot
+        finish. Point those at ``/health``, which reports the same ``stage`` and
+        ``checks`` with a 200.
 
         Returns:
-            dict: Readiness status with details about each object type (HTTP 200 when ready).
+            dict: ``status`` (``"ready"``), ``stage``, ``checks``,
+            ``uptime_seconds``.
 
         Raises:
-            HTTPException: 500 status when still initializing.
+            HTTPException: 503 while still initializing, with ``Retry-After``
+                and the same ``stage``/``checks`` payload under ``detail``.
         """
-        result = service.readiness_check()
-
-        # Gate readiness on semantic encoder warmup too. Without this, the first
-        # request that triggers an embedding races the background warmup and both
-        # pay the model cold-load (download + onnx session build) at once.
-        warmup_task = getattr(request.app.state, "encoder_warmup_task", None)
-        warmup_done = warmup_task is None or warmup_task.done()
-        result.setdefault("checks", {})["encoder_warmup"] = warmup_done
-        if not warmup_done:
-            raise HTTPException(
-                status_code=500,
-                detail={"status": "initializing", "checks": result["checks"]},
-            )
-        return result
+        return service.readiness_check(_encoder_warmup_done(request.app))

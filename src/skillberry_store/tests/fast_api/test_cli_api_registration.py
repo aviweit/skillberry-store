@@ -131,7 +131,7 @@ def test_readiness_has_no_cli_check(sbs_app):
     balancer over a download convenience.
 
     Asserted against the readiness *payload* rather than its status code: the
-    endpoint reports 503/500 until the semantic encoder finishes its background
+    endpoint reports 503 until the semantic encoder finishes its background
     warmup, which is a pre-existing condition unrelated to the CLI. What matters
     here is that no CLI-derived check was added to that set.
     """

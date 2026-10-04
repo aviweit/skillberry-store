@@ -244,8 +244,10 @@ sbs search-vnfs-servers --search-term "data files"
 ### Admin
 
 ```bash
-# Health checks
+# Liveness + boot stage (always succeeds while the process is up)
 sbs health
+
+# Strict readiness (fails until the store is operational)
 sbs health-ready
 
 # Prometheus metrics

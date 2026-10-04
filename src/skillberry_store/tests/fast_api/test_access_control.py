@@ -215,7 +215,9 @@ def test_standalone_missing_auth_returns_401(fresh_sbs_factory):
 def test_standalone_unauth_allowlist_reachable(fresh_sbs_factory):
     client = fresh_sbs_factory(_standalone_yaml())
     assert client.get("/health").status_code == 200
-    assert client.get("/health/ready").status_code in (200, 500)
+    # 200 once the encoder warmup has finished, 503 while it has not. Never
+    # 500: readiness answers "can this serve traffic yet", not "is it broken".
+    assert client.get("/health/ready").status_code in (200, 503)
     assert client.get("/openapi.json").status_code == 200
     # Login endpoint reachable without any token.
     r = client.post("/auth/login", json={"username": "alice", "password": "alice-pw"})

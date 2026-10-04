@@ -386,6 +386,67 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- **`GET /health` now reports the boot stage, and `GET /health/ready` answers 503
+  instead of 500 while initialising.** The probes were unusable as a deployment
+  health check. `/health` returned a constant `{"status": "healthy"}` that said
+  nothing about startup progress, and `/health/ready` — the only stage-aware
+  answer — signalled "still initialising" with **HTTP 500**, which a platform
+  reads as a crash. Pointed at it, Render tore the instance down mid-boot, the
+  replacement entered the same window, and the service restart-looped until a
+  boot happened to win the race.
+
+  The two answers are now split across the status code and the body rather than
+  being squeezed into one status code:
+
+  | Endpoint | Answers | While booting | Point it at |
+  | --- | --- | --- | --- |
+  | `GET /health` | "is this alive?" | **200** | Render health check path, Kubernetes `livenessProbe`, target groups, `docker HEALTHCHECK` |
+  | `GET /health/ready` | "can it serve content yet?" | **503** + `Retry-After` | `readinessProbe`, load-balancer membership, test harnesses |
+
+  `/health` answers 200 for as long as the process can serve HTTP — including
+  before the object handlers exist — and carries progress in the payload:
+
+  ```json
+  {
+    "status": "healthy",
+    "stage": "initializing",
+    "checks": {"skill": true, "encoder_warmup": false},
+    "uptime_seconds": 4.182
+  }
+  ```
+
+  `stage` is `initializing` or `operational`; `checks` names the individual gate
+  that is still open (usually `encoder_warmup`, the ONNX sentence-encoder load),
+  so a slow boot can be diagnosed rather than just observed. A client that needs
+  semantic search waits for `stage == "operational"` instead of keying off a
+  status code that cannot express it.
+
+  Both probes answer in **every** ACL mode (`disabled` and `standalone`) with no
+  credentials, and stay reachable even if an operator writes an
+  `unauthenticated_paths` list that omits them — the built-in allow-list is a
+  floor that config adds to, now asserted over both modes and over every shipped
+  YAML including `access_control_config.yaml.demo`.
+
+  **Deployers: set Render's Health Check Path to `/health`, not
+  `/health/ready`.** Render restarts an instance after 60 s of consecutive
+  health-check failures, which a cold encoder warmup on a shared-CPU free
+  instance can exceed — and the restart re-enters the same window. See
+  [docs/health-probes.md](docs/health-probes.md) for the Render, Kubernetes and
+  Docker settings, and for three non-probe causes of the same restart symptom:
+  the service does not read Render's `$PORT` (`SBS_PORT` defaults to 8000), peak
+  RSS measures ~414 MB against the free plan's 512 MB cap, and uvicorn binds only
+  2.7 s after process start. That last one is why binding early and serving a
+  cut-down route table was considered and rejected — the doc records the
+  reasoning, including that deferring route registration would move
+  `audit_rbac_coverage` behind a server already accepting traffic.
+
+  Payload changes are additive: `/health` still carries `"status": "healthy"` and
+  a ready `/health/ready` still carries `"status": "ready"` plus `checks`, so the
+  demo script, the CLI-artifacts workflow and the generated SDK are unaffected.
+  The only behavioural change is the readiness status code while initialising,
+  500 -> 503 — anything asserting specifically on 500 rather than on "not 200"
+  needs updating.
+
 - **Anthropic skill import no longer turns every path segment into a tag.**
   Importing a skill tagged each generated tool and snippet with `file:<path>`
   *and* with one bare tag per segment of that same path — so

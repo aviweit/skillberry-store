@@ -26,13 +26,22 @@ def fresh_sbs():
 
 
 def test_health_endpoint(fresh_sbs):
-    """Test that the health endpoint returns the expected response."""
+    """Smoke test: the health endpoint answers 200 and reports a boot stage.
+
+    The full probe contract — always-200 liveness, the stage vocabulary, the
+    503 readiness payload — lives in ``test_health_probes.py``. This stays a
+    bare reachability check, asserted on fields rather than on the whole dict:
+    the payload is additive by design, so an exact-equality assertion here
+    would fail every time a new check is reported.
+    """
     client = TestClient(fresh_sbs)
 
     response = client.get("/health")
 
     assert response.status_code == 200
-    assert response.json() == {"status": "healthy"}
+    body = response.json()
+    assert body["status"] == "healthy"
+    assert body["stage"] in ("initializing", "operational")
 
 
 def _create_snippet(client: TestClient, name: str, content: str) -> None:

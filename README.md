@@ -301,7 +301,9 @@ Available command groups:
 | **vNFS Servers** | `create-vnfs-server`, `list-vnfs-servers`, `get-vnfs-server`, `update-vnfs-server`, `delete-vnfs-server`, `start-vnfs-server`, `search-vnfs-servers` |
 | **Admin** | `metrics`, `purge-all`, `health`, `health-ready` |
 
-For detailed CLI documentation, see [docs/cli.md](docs/cli.md).
+For detailed CLI documentation, see [docs/cli.md](docs/cli.md). For what the two
+health probes mean and how to wire them into Render, Kubernetes or Docker, see
+[docs/health-probes.md](docs/health-probes.md).
 
 ## Engage with the Service via MCP 📜
 

@@ -6,6 +6,7 @@ import io
 import json
 import logging
 import os
+import time
 import zipfile
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Dict
@@ -22,6 +23,21 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 PROMETHEUS_METRICS_PORT = int(os.getenv("PROMETHEUS_METRICS_PORT", 8090))
+
+# Startup stages reported by ``GET /health``. Deliberately two values, not a
+# richer taxonomy: this vocabulary is consumed by an external platform health
+# check and by the UI, so it has to stay small and stable.
+#
+#   initializing -- the process serves HTTP, but at least one startup gate is
+#                   still open. Normal and transient; NOT a failure.
+#   operational  -- every gate is closed; semantic search and content requests
+#                   are served in full.
+STAGE_INITIALIZING = "initializing"
+STAGE_OPERATIONAL = "operational"
+
+# Object types whose description store has to exist before the store can answer
+# content requests.
+_READINESS_OBJECT_TYPES = ("tool", "snippet", "skill", "vmcp", "vnfs")
 
 
 class AdminService:
@@ -40,9 +56,15 @@ class AdminService:
         self,
         vmcp_server_manager: "VirtualMcpServerManager | None" = None,
         vnfs_server_manager: "VirtualNfsServerManager | None" = None,
+        started_at: float | None = None,
     ) -> None:
         self.vmcp_server_manager = vmcp_server_manager
         self.vnfs_server_manager = vnfs_server_manager
+        # Monotonic, so the reported uptime cannot go backwards when the host
+        # clock is stepped. Constructed inside ``SBS.__init__``, which is the
+        # closest thing to "process start" this layer can observe; injectable so
+        # a test can assert the field without sleeping.
+        self._started_at = time.monotonic() if started_at is None else started_at
 
     # ------------------------------------------------------------------
     # Metrics
@@ -458,28 +480,89 @@ class AdminService:
     # Health / readiness
     # ------------------------------------------------------------------
 
-    def readiness_check(self) -> Dict[str, Any]:
-        """Check whether all description stores have finished initialising.
+    def collect_checks(self, encoder_warmup_done: bool) -> Dict[str, bool]:
+        """Every startup gate, by name, as a flat ``name -> closed?`` map.
+
+        Never raises, by contract. ``get_object_handler`` throws ``RuntimeError``
+        until ``initialize_object_handlers()`` has run, and a liveness probe that
+        propagated that would answer 5xx during exactly the window it exists to
+        describe — which is what makes a platform health check tear a booting
+        instance down and start the boot over. A gate that cannot be inspected
+        yet is reported as still open instead.
+
+        Args:
+            encoder_warmup_done: Whether the background semantic-encoder warmup
+                has finished. Resolved by the API layer from ``app.state``,
+                which is where the task handle lives.
 
         Returns:
-            dict: ``{"status": "ready", "checks": {...}}``
-
-        Raises:
-            HTTPException: 500 while still initialising.
+            dict: Gate name to ``True`` when closed (that part of startup is
+            done), ``False`` while still pending.
         """
         from skillberry_store.modules.object_handler import get_object_handler
 
-        checks = {}
-        for object_type in ["tool", "snippet", "skill", "vmcp", "vnfs"]:
-            handler = get_object_handler(object_type)
-            desc = handler.descriptions
+        checks: Dict[str, bool] = {}
+        for object_type in _READINESS_OBJECT_TYPES:
+            try:
+                desc = get_object_handler(object_type).descriptions
+            except Exception:
+                checks[object_type] = False
+                continue
+            # A handler with no description store does not hold the gate open —
+            # there is nothing to wait for. Pre-existing semantics, kept.
             if desc is not None:
                 checks[object_type] = desc.is_ready
+        checks["encoder_warmup"] = encoder_warmup_done
+        return checks
 
-        all_ready = all(checks.values())
-        if not all_ready:
+    def health_report(self, encoder_warmup_done: bool) -> Dict[str, Any]:
+        """Liveness payload: alive, plus which startup stage we are in.
+
+        ``status`` is always ``"healthy"``: it answers "should this process be
+        restarted?", and the answer is no for as long as it can serve this
+        request at all. Boot progress is reported out of band in ``stage`` so a
+        caller can distinguish "still booting" from "ready" *without* a non-2xx
+        status code standing in for it.
+
+        Args:
+            encoder_warmup_done: Whether the background encoder warmup finished.
+
+        Returns:
+            dict: ``status``, ``stage``, per-gate ``checks``, ``uptime_seconds``.
+        """
+        checks = self.collect_checks(encoder_warmup_done)
+        stage = STAGE_OPERATIONAL if all(checks.values()) else STAGE_INITIALIZING
+        return {
+            "status": "healthy",
+            "stage": stage,
+            "checks": checks,
+            "uptime_seconds": round(time.monotonic() - self._started_at, 3),
+        }
+
+    def readiness_check(self, encoder_warmup_done: bool) -> Dict[str, Any]:
+        """Readiness payload: 200 only once every startup gate is closed.
+
+        Args:
+            encoder_warmup_done: Whether the background encoder warmup finished.
+
+        Returns:
+            dict: The ``health_report`` payload with ``status`` set to
+            ``"ready"``.
+
+        Raises:
+            HTTPException: 503 while still initialising, carrying the same
+                ``stage``/``checks`` payload in ``detail``. 503 rather than the
+                500 this used to raise: a store that has not finished booting is
+                temporarily unable to serve, which an orchestrator should act on
+                by waiting, not a server fault it should act on by restarting.
+                ``Retry-After`` names the poll interval so a client does not
+                have to invent one.
+        """
+        report = self.health_report(encoder_warmup_done)
+        if report["stage"] != STAGE_OPERATIONAL:
             raise HTTPException(
-                status_code=500, detail={"status": "initializing", "checks": checks}
+                status_code=503,
+                detail={**report, "status": STAGE_INITIALIZING},
+                headers={"Retry-After": "5"},
             )
-
-        return {"status": "ready", "checks": checks}
+        return {**report, "status": "ready"}
