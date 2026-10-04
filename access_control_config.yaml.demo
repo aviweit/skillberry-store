@@ -1,0 +1,247 @@
+# Default access-control config. Ships with mode: disabled so the store
+# behaves identically to prior versions until an operator opts in.
+#
+# See docs/design/access-control.md for the full schema and the operator
+# quickstart (provision a user via ./scripts/setup_user.py, then switch
+# mode to 'standalone').
+
+mode: standalone
+
+# Publish skills for `npx skills add` (docs/design/npx.md).
+# Serves SKILL.md CONTENT — not just metadata — to anyone holding a per-skill
+# install URL, with no session (§4.3.3). One skill per URL; the URL's ref grants
+# that skill only.
+#
+# Three values, independent of `mode` above:
+#   true        every visible skill is publishable
+#   false       nothing is; the /pub routes are not registered at all
+#   selective   each skill's own `npx_publish` flag decides (the DEFAULT when
+#               this key is absent). A skill that has not set it is NOT
+#               published, so skills are opted in deliberately — edit one with
+#               `PUT /skills/{name}` or the toggle on its page in the UI.
+#
+# `true`/`false` ignore the per-skill flag, so either one publishes or withdraws
+# the whole store in a single edit.
+#
+# This shipped config is `mode: disabled`, where nothing is protected anyway, so
+# it ships `true` to make a bare dev checkout usable out of the box.
+npx_publish: true
+
+unauthenticated_paths:
+  - GET /health
+  - GET /health/ready
+  - GET /admin/metrics
+  - POST /auth/login
+  - POST /auth/logout
+  - GET /auth/whoami
+  - GET /docs
+  - GET /openapi.json
+  - GET /redoc
+  # Root redirect and SPA deep-links → /ui: public, no auth needed.
+  - GET /
+  - GET /ui*
+  - HEAD /ui*
+  - GET /control_sse*
+  - POST /control_sse*
+  # Per-skill discovery for `npx skills add` (docs/design/npx.md §4.3.8).
+  # Read-only, one skill per URL, gated by `npx_publish` above — when that is
+  # off the routes are not registered at all and this entry matches nothing.
+  # The path segment is a scoped capability token that resolves to a tenant and
+  # is re-authorized on every request, so it stops working the moment that
+  # tenant loses `skills:list`.
+  # NOTE: `_path_matches` supports only a trailing '*' — a middle wildcard like
+  # /pub/*/.well-known/* is inexpressible, so /pub/ MUST remain a dedicated
+  # prefix with nothing else ever mounted under it (§5.10 #1).
+  - GET /pub/*
+  # CLI download (docs/design/new_cli.md §5.5). A browser, `curl`, CI or a
+  # freshly downloaded binary has no token to offer, and a user who cannot sign
+  # in yet is exactly the user who wants the CLI. It serves no tenant data, no
+  # config and no login message, and accepts no request body.
+  # HEAD is listed alongside GET because /cli/download serves both, and because
+  # HEAD is how a client reads the artifact's sha256 without transferring it.
+  - GET /cli*
+  - HEAD /cli*
+
+# --- Mode-specific: standalone only -------------------------------------
+standalone:
+  session_ttl_seconds: 43200          # 12h; env: SBS_SESSION_TTL
+  users:
+    - username: skillberry
+      tenant_id: skillberry
+      password_hash: '$2b$12$z1CKK7qHY.6ZlEAHbKBfDO5s/mWZin.SpU.iHyseaeOkUeOIqZZc2'
+      groups: []
+    - username: skillberry-admin
+      tenant_id: skillberry-admin
+      password_hash: '$2b$12$ssgkuUTSeR5B6mAJyoNm2udcEs2DcX5Kq4XuTYUnqrx3hO/DBy67e'
+      groups: []
+
+  # Informational message shown at login (UI sign-in screen and `sbs login`).
+  # `enabled` gates the display, `message` holds the text, `format` picks how it
+  # is presented and `style` dresses the UI banner — all independent controls.
+  #
+  #   format: plain   the default. One string, shown verbatim. 1024 chars/10 lines.
+  #   format: rich    Markdown-flavoured markup + the `style` block below, for a
+  #                   banner nobody can miss. 8192 chars/40 lines.
+  #
+  # `sbs login` and GET /auth/whoami always get the PLAIN text either way: a rich
+  # message degrades back to itself with the markup resolved away, so a terminal
+  # never sees markup and never sees an escape sequence. Full grammar, the
+  # attribute and colour allow-lists, and the `style` schema are in
+  # docs/design/login-banner.md; the plain layer is docs/design/login-info.md.
+  #
+  # WARNING: this message is served PRE-AUTHENTICATION to anyone who can reach
+  # /ui/ or GET /auth/whoami. It must contain NO SECRETS. That it sits in the
+  # same file as the bcrypt password hashes does not make it confidential. The
+  # credentials quoted below are only safe to name because this whole file is a
+  # demo config with well-known passwords.
+  login_info:
+    enabled: true
+    format: rich
+    style:
+      # The masthead, measured: ground #151515, white type, the `</>` mark in
+      # #0066CC, links in #2B9AF3. So the banner is BLACK with white type and
+      # blue only on the accents - the mark, the frame, the badge, the link.
+      # An earlier version lifted blue through the middle of the gradient and
+      # the whole banner read as navy, which drowned the mark; the gradient now
+      # stays black and only varies in lightness, so it glosses like polished
+      # black rather than tinting.
+      gradient: ["#0b0b0b", "#242424", "#0b0b0b"]
+      gradient_angle: 120
+      text_color: "#ffffff"
+      border_color: "#0066cc"
+      border_width: 2
+      # Square, like every card on the landing page (PatternFly v5 renders them
+      # with radius 0 and no shadow) - the glow does the lifting instead.
+      radius: 0
+      padding: lg
+      align: center
+      font_size: lg
+      shadow: lg
+      # glow: "#0066cc"
+      # The store's wordmark, in the blue the masthead paints it.
+      icon: code
+      icon_color: "#0066cc"
+      # animate: [pulse-border, shimmer, gradient-shift]
+    # Markup notes, in the order it appears below:
+    #   `#`/`##`          heading, largest first
+    #   [x]{...}          style a span: colour, size, pill, glow, weight
+    #   pill              draw the span as a rounded badge
+    #   mono              monospace chip in the UI, backticks in the terminal
+    #   [text](url)       a link; text that is its own URL degrades back to just
+    #                     the URL, which is why the CLI still shows one line here
+    #   trailing {...}    applies to the whole line (note the leading space)
+    #
+    # Two pill treatments, doing two different jobs: LIVE DEMO wears the brand
+    # blue because it is the one thing that should shout, and the credentials are
+    # white-on-black keycaps - the masthead's own contrast, inverted - because
+    # they are the one thing a visitor has to read and type.
+    #
+    # Every line degrades to exactly the text it started as, so `sbs login` still
+    # prints the same four plain lines it always did.
+    message: |
+      # Skillberry Store 
+      # LIVE DEMO
+      ## [:star: **Visit us** and *drop us a star!* :star:]{color=#ffffff}
+      [https://github.com/skillberry-ai/skillberry-store](https://github.com/skillberry-ai/skillberry-store){bold color=#2b9af3 underline}
+      Sign in as [skillberry]{mono pill bold size=lg bg=#ffffff color=#151515} with password [skillberry]{mono pill bold size=lg bg=#ffffff color=#151515}. {color=#d2d2d2}
+
+# --- RBAC ---------------------------------------------------------------
+roles:
+  - name: reader
+    rules:
+      - resources: [skills, tools, snippets, vmcp_servers, vnfs_servers,
+                    facets, plugins, system]
+        verbs: [list, get, search]
+
+  - name: content-author
+    rules:
+      - resources: [skills, tools, snippets]
+        verbs: [list, get, search, create, update, delete]
+
+  - name: tool-runner
+    rules:
+      - resources: [tools, vmcp_servers, vnfs_servers]
+        verbs: [execute]
+
+  - name: server-operator
+    rules:
+      - resources: [vmcp_servers, vnfs_servers]
+        verbs: [list, get, create, update, delete, execute]
+
+  - name: admin
+    rules:
+      - resources: ["*"]
+        verbs: ["*"]
+
+  - name: base-user
+    rules:
+      - resources: [skills, tools, snippets, vmcp_servers, vnfs_servers,
+                    facets, plugins, system]
+        verbs: [list, get, search, execute]
+
+
+  # Identity a plugin's autonomous work runs as (plugin-identity §5.3). Content
+  # authorship, tool execution and virtual-server publication — nothing more. It
+  # never mentions the `admin` resource, so /admin/backup, /admin/restore and
+  # /admin/purge-all are out of reach by construction rather than by omission.
+  - name: plugin-agent
+    rules:
+      - resources: [skills, tools, snippets]
+        verbs: [list, get, search, create, update, delete]
+                                                     # delete: `simulate` removes
+                                                     # the sim skill/tools it
+                                                     # created, on teardown
+      - resources: [tools]
+        verbs: [execute]                             # StoreAPI.execute_tool —
+                                                     # dast's benign twin runs the
+                                                     # skill's own tools through
+                                                     # the store's execution path
+      - resources: [vmcp_servers, vnfs_servers]
+        verbs: [list, get, create, update, delete, execute]
+                                                     # execute == start; this is
+                                                     # what export over vNFS /
+                                                     # WebDAV / vMCP requires
+      - resources: [facets, plugins]
+        verbs: [list, get, search]
+
+bindings:
+  - name: skillberry-base
+    subjects:
+      - kind: tenant
+        name: skillberry
+    roles: [base-user]
+
+  - name: skillberry-admin
+    subjects:
+      - kind: tenant
+        name: skillberry-admin
+    roles: [admin]
+
+  # `plugin-user` is deliberately a VIRTUAL subject: it appears in roles and
+  # bindings so its grants are reviewable in the same file as every other grant,
+  # but it has NO `standalone.users` entry — therefore no password hash, and no
+  # way to log in from the network. `POST /auth/login` as plugin-user returns
+  # invalid_credentials like any unknown user, so the identity is unforgeable
+  # from outside: no credential for it exists anywhere.
+  - name: plugin-agent-binding
+    subjects:
+      - kind: tenant
+        name: plugin-user
+    roles: [plugin-agent]
+
+# --- Plugin identity ----------------------------------------------------
+# Deployment-wide fallback identity for plugin work that no per-plugin owner
+# covers. Precedence: the owner recorded when a tenant enabled the plugin (see
+# PATCH /plugins/{name}) -> this -> none, in which case the plugin's outward
+# calls FAIL rather than proceeding anonymously (P5).
+#
+# Shipping a default matters: with triggers running as the owner tenant, a
+# deployment with no default has seven auto-triggering plugins whose first
+# import fails silently on the event path.
+plugins:
+  owner_tenant: plugin-user
+  # Groups to attribute to the owner tenant (it has no users entry of its own).
+  owner_groups: []
+  # Tokens minted for a plugin's out-of-process calls are short-lived and
+  # refreshed on demand rather than held for a session's lifetime.
+  token_ttl_seconds: 900
