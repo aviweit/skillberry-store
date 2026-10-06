@@ -713,6 +713,13 @@ class ToolsService:
         parameters, and return type, then either creates a new tool or updates
         an existing one with the same name.
 
+        When the signature uses a ``Literal`` or a module-defined type (e.g. a
+        Pydantic model), the parameters are instead derived from the type
+        annotations, keeping nested structure and ``enum`` values, with the
+        docstring supplying only the descriptions. Parameters with a default
+        are then listed as optional rather than required. Any failure in that
+        derivation keeps the docstring-derived parameters.
+
         For the create path, dependency auto-detection runs inside
         :meth:`create`. For the update path, dependency auto-detection happens
         here because :meth:`update` does not handle the module file or
@@ -751,14 +758,34 @@ class ToolsService:
         if not description:
             raise ValueError("Function docstring must include a description.")
 
+        from skillberry_store.utils.annotation_schema import (
+            annotation_types,
+            derive_params_schema,
+        )
+
+        # A docstring type wins; the annotation fills in when the docstring has none.
+        hints = annotation_types(file_bytes, func_name)
         params_properties: Dict[str, Any] = {}
         required_params: List[str] = []
         for param in docstring_obj.params:
             params_properties[param.arg_name] = {
-                "type": param.type_name if param.type_name else "string",
+                "type": param.type_name or hints.get(param.arg_name) or "string",
                 "description": param.description if param.description else "",
             }
             required_params.append(param.arg_name)
+        optional_params: List[str] = []
+
+        rich = derive_params_schema(
+            file_bytes,
+            func_name,
+            {name: prop["description"] for name, prop in params_properties.items()},
+        )
+        if rich is not None:
+            params_properties = rich["properties"]
+            required_params = rich["required"]
+            optional_params = [
+                name for name in params_properties if name not in required_params
+            ]
 
         returns_dict: Optional[Dict[str, Any]] = None
         if docstring_obj.returns:
@@ -786,7 +813,7 @@ class ToolsService:
                     "type": "object",
                     "properties": params_properties,
                     "required": required_params,
-                    "optional": [],
+                    "optional": optional_params,
                 },
             }
             if returns_dict:
@@ -830,7 +857,7 @@ class ToolsService:
                 "type": "object",
                 "properties": params_properties,
                 "required": required_params,
-                "optional": [],
+                "optional": optional_params,
             },
         }
         if returns_dict:
