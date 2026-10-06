@@ -10,6 +10,7 @@ from typing import Annotated, Any, List, Optional
 
 from mcp.server.fastmcp import FastMCP
 from skillberry_store.modules.object_handler import get_object_handler
+from skillberry_store.utils.annotation_schema import derive_params_schema
 
 # observability - metrics for runtime tool invocation inside the VMCP server.
 # These belong here (not in the FastAPI layer) because they describe runtime
@@ -226,10 +227,7 @@ class VirtualMcpServer:
                     tools.append(self.tool_dict_to_mcp_tool(tool_dict))
                 else:
                     # Fallback to HTTP when app is not available
-                    response = requests.get(
-                        f"{self.sts_url}/tools/{tool_uuid}",
-                        params={"fields": "full"},
-                    )
+                    response = requests.get(f"{self.sts_url}/tools/{tool_uuid}")
                     response.raise_for_status()
                     tool_dict = response.json()
                     tool_name = tool_dict.get("name")
@@ -314,20 +312,17 @@ class VirtualMcpServer:
                             )
                             continue
 
-                        if not isinstance(param_info, dict):
+                        # Validate param_info has required keys
+                        if not isinstance(param_info, dict) or "type" not in param_info:
                             logging.warning(
-                                f"Skipping invalid parameter {param_name}: not a schema object"
+                                f"Skipping invalid parameter {param_name}: missing 'type' field"
                             )
                             continue
 
                         description = param_info.get(
                             "description", f"Parameter {param_name}"
                         )
-                        # A property with no top-level "type" (e.g. an Optional
-                        # field's "anyOf") must still be a parameter, otherwise
-                        # FastMCP drops its argument; it is accepted as-is and
-                        # the published schema describes it (see below).
-                        _type = param_info.get("type", "any")
+                        _type = param_info["type"]
 
                         # annotate the parameter so that is appears inside MCP tool
                         # i.e. when being retrieved via MCP client
@@ -350,7 +345,7 @@ class VirtualMcpServer:
                                 inspect.Parameter(
                                     param_name,
                                     inspect.Parameter.POSITIONAL_OR_KEYWORD,
-                                    default=None,
+                                    default=param_info.get("default"),
                                     annotation=annotated_type,
                                 )
                             )
@@ -441,19 +436,74 @@ class VirtualMcpServer:
 
                 return handler
 
-            handler = make_handler(tool.name, tool.__dict__)
+            # The stored params are flat (one type per parameter); for a tool
+            # annotated with Pydantic models or Literals, build the handler from
+            # the annotation-derived schema so its arguments validate against it.
+            # A parameter defaulting to None (Optional[X]) is typed "any" in the
+            # handler so an explicit null is still accepted.
+            rich_schema = self._rich_input_schema(tool.name)
+            tool_schema = dict(tool.__dict__)
+            if rich_schema is not None:
+                tool_schema["inputSchema"] = {
+                    **rich_schema,
+                    "properties": {
+                        name: {**prop, "type": "any"}
+                        if "default" in prop and prop["default"] is None
+                        else prop
+                        for name, prop in rich_schema["properties"].items()
+                    },
+                }
+            handler = make_handler(tool.name, tool_schema)
 
             # Use FastMCP's add_tool method
             self.mcp.add_tool(handler, name=tool.name, description=tool.description)
 
             # FastMCP publishes a schema built from the handler's flat signature,
             # which drops nested structure (items, enum, object properties).
-            # Publish the stored schema instead when it carries such structure.
-            rich_schema = publishable_input_schema(tool.inputSchema)
             if rich_schema is not None:
                 registered = self.mcp._tool_manager.get_tool(tool.name)
                 if registered is not None:
                     registered.parameters = rich_schema
+
+    def _rich_input_schema(self, tool_name: str) -> Optional[dict]:
+        """
+        Return the tool's JSON Schema derived from its Python annotations, or None.
+
+        Only Python code tools whose signature uses a ``Literal`` or a
+        module-defined type (e.g. a Pydantic model) get one; parameter
+        descriptions are taken from the stored params. See
+        ``utils.annotation_schema``.
+
+        Parameters:
+            tool_name (str): name of a tool listed by this server
+        """
+        manifest = self._tool_manifests.get(tool_name) or {}
+        if (
+            manifest.get("programming_language") != "python"
+            or manifest.get("packaging_format") == "mcp"
+        ):
+            return None
+        try:
+            if self.app:
+                source = self.tools_handler.read_file(
+                    manifest["uuid"], manifest["module_name"], raw_content=True
+                )
+            else:
+                response = requests.get(
+                    f"{self.sts_url}/tools/{manifest['uuid']}/module"
+                )
+                response.raise_for_status()
+                source = response.text
+        except Exception as e:
+            logging.warning(f"Could not read the module of tool '{tool_name}': {e}")
+            return None
+        stored = (manifest.get("params") or {}).get("properties") or {}
+        descriptions = {
+            name: prop.get("description")
+            for name, prop in stored.items()
+            if isinstance(prop, dict)
+        }
+        return derive_params_schema(source, tool_name, descriptions)
 
     def _register_prompts(self):
         """
@@ -762,51 +812,5 @@ def param_type_to_python_type(param_type: str) -> Any:
         "any": object,  # 'any' can be mapped to object or str, depending on use case
     }
 
-    # A JSON Schema "type" may also be a list (e.g. ["string", "null"])
-    if not isinstance(param_type, str):
-        return object
-
     # Return the corresponding Python type as a string
     return type_mapping.get(param_type, object)
-
-
-# Property keys the flat handler signature already expresses.
-_FLAT_PROPERTY_KEYS = {"type", "description", "title", "default"}
-
-
-def publishable_input_schema(params: Any) -> Optional[dict]:
-    """
-    Return the stored tool params as the MCP ``inputSchema`` to publish, or None.
-
-    None keeps FastMCP's signature-derived schema, which is equivalent for a
-    tool whose parameters are only typed and described. A schema is returned
-    only when some property carries more (``items``, ``enum``, ``properties``,
-    ``anyOf``, ...) and the whole is a valid JSON Schema object; the store's
-    non-standard ``optional`` key is removed.
-
-    Parameters:
-        params (Any): the ``params`` field of a stored tool
-    """
-    if not isinstance(params, dict):
-        return None
-    properties = params.get("properties")
-    if params.get("type") != "object" or not isinstance(properties, dict):
-        return None
-    if not any(
-        isinstance(prop, dict) and set(prop) - _FLAT_PROPERTY_KEYS
-        for prop in properties.values()
-    ):
-        return None
-
-    schema = {k: v for k, v in params.items() if k != "optional"}
-    try:
-        from jsonschema import Draft202012Validator
-        from jsonschema.exceptions import SchemaError
-
-        Draft202012Validator.check_schema(schema)
-    except ImportError:
-        return None
-    except SchemaError as e:
-        logging.warning(f"Stored tool params are not a valid JSON Schema: {e.message}")
-        return None
-    return schema

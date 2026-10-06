@@ -18,8 +18,7 @@ def mcp_content(tool_dict: dict) -> str:
     parameters = {
         "type": "object",
         "properties": {
-            # A property may carry no top-level "type" (e.g. anyOf); "object" passes through.
-            k: {"type": v.get("type", "object"), "description": f"The {k} parameter."}
+            k: {"type": v["type"], "description": f"The {k} parameter."}
             for k, v in input_schema.get("properties", {}).items()
         },
         "required": input_schema.get("required", []),
@@ -112,8 +111,7 @@ def mcp_json_converter(tool: dict, manifest_as_dict: dict) -> dict:
     parameters = {
         "type": "object",
         "properties": {
-            # A property may carry no top-level "type" (e.g. anyOf); "object" passes through.
-            k: {"type": v.get("type", "object"), "description": f"The {k} parameter."}
+            k: {"type": v["type"], "description": f"The {k} parameter."}
             for k, v in input_schema.get("properties", {}).items()
         },
         "required": input_schema.get("required", []),

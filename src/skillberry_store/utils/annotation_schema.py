@@ -9,14 +9,14 @@ parameter annotated with a Pydantic model (``List[Passenger]``) or a
 its elements is lost. This module recovers that structure the same way the
 annotation's own library does: it builds a Pydantic model from the function
 signature and emits ``model_json_schema()``, with every ``$ref`` inlined so
-the result is self-contained (the store's params model keeps
-``properties`` but has nowhere to store ``$defs``).
+the result is self-contained. The vMCP server publishes it as a tool's MCP
+``inputSchema``; the stored tool params are left unchanged.
 
 The tool body is never run. A reduced module is built from the source -
 the function signature with its body stubbed, plus only the module-level
 imports, classes and assignments that signature transitively references -
 and executed in a fresh namespace. Any failure returns ``None`` so callers
-keep their existing docstring-derived params.
+keep the schema they already have.
 """
 
 import ast
@@ -84,10 +84,12 @@ def _bound_names(node: ast.stmt) -> Set[str]:
 
 
 def _find_function(tree: ast.Module, func_name: str) -> Optional[ast.FunctionDef]:
+    # the last definition wins, as when the module is executed
+    found = None
     for node in tree.body:
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == func_name:
-            return node
-    return None
+            found = node
+    return found
 
 
 def _signature_nodes(func: ast.FunctionDef) -> List[ast.AST]:
@@ -96,24 +98,6 @@ def _signature_nodes(func: ast.FunctionDef) -> List[ast.AST]:
     return [a.annotation for a in all_args] + list(args.defaults) + [
         d for d in args.kw_defaults if d is not None
     ]
-
-
-def annotation_types(module_source: Any, func_name: str) -> Dict[str, str]:
-    """Map each annotated parameter of ``func_name`` to its annotation text."""
-    if isinstance(module_source, bytes):
-        module_source = module_source.decode("utf-8", errors="replace")
-    try:
-        func = _find_function(ast.parse(module_source), func_name)
-    except SyntaxError:
-        return {}
-    if func is None:
-        return {}
-    args = func.args.posonlyargs + func.args.args + func.args.kwonlyargs
-    return {
-        a.arg: ast.unparse(a.annotation)
-        for a in args
-        if a.annotation is not None and a.arg not in _SELF_NAMES
-    }
 
 
 def needs_rich_schema(module_source: str, func_name: str) -> bool:
@@ -196,6 +180,36 @@ def inline_refs(node: Any, defs: Dict[str, Any], _seen: tuple = ()) -> Any:
     return node
 
 
+def drop_null_types(node: Any) -> Any:
+    """Rewrite JSON Schema-only constructs into ones every consumer understands.
+
+    ``Optional[X]`` (``anyOf: [X, {"type": "null"}]``) becomes ``X``, keeping its
+    ``default``, and ``const`` becomes a one-value ``enum``; so the result has no
+    ``null`` type and every optional parameter keeps a single ``type``.
+    """
+    if isinstance(node, list):
+        return [drop_null_types(x) for x in node]
+    if not isinstance(node, dict):
+        return node
+    out = {k: drop_null_types(v) for k, v in node.items()}
+    for key in ("anyOf", "oneOf"):
+        options = out.get(key)
+        if not isinstance(options, list):
+            continue
+        rest = [o for o in options if o != {"type": "null"}]
+        if len(rest) == len(options):
+            continue
+        if len(rest) == 1 and isinstance(rest[0], dict):
+            del out[key]
+            out = {**rest[0], **out}
+        else:
+            out[key] = rest
+    if "const" in out:
+        out.setdefault("enum", [out["const"]])
+        del out["const"]
+    return out
+
+
 def derive_params_schema(
     module_source: str,
     func_name: str,
@@ -227,12 +241,18 @@ def derive_params_schema(
         if reduced is None:
             return None
         raw = _model_schema(reduced, func_name)
-        schema = inline_refs(raw, raw.get("$defs", {}))
+        schema = drop_null_types(inline_refs(raw, raw.get("$defs", {})))
     except Exception as e:
         logger.warning(f"Could not derive annotation schema for '{func_name}': {e}")
         return None
 
     properties = schema.get("properties", {})
+    untyped = [n for n, p in properties.items() if not isinstance(p.get("type"), str)]
+    if untyped:
+        # e.g. Union[A, B] or Any: keep the flat schema rather than publish a
+        # parameter with no single type
+        logger.info(f"Keeping the flat schema for '{func_name}': untyped {untyped}")
+        return None
     for name, desc in (descriptions or {}).items():
         if name in properties and desc:
             properties[name]["description"] = desc

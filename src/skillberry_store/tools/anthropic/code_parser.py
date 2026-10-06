@@ -8,8 +8,6 @@ import logging
 import re
 from typing import List, Dict, Any, Optional, Tuple
 
-from skillberry_store.utils.annotation_schema import derive_params_schema
-
 logger = logging.getLogger(__name__)
 
 
@@ -109,27 +107,14 @@ def _ast_annotation_to_json_type(annotation: Optional[ast.expr]) -> str:
     return "string"
 
 
-def _docstring_type_to_json_type(type_text: str) -> str:
-    """Convert a docstring parameter type such as ``int`` or ``List[str]`` to a JSON schema type."""
-    text = re.sub(r",\s*optional\s*$", "", type_text.strip(), flags=re.IGNORECASE)
-    try:
-        return _ast_annotation_to_json_type(ast.parse(text, mode="eval").body)
-    except SyntaxError:
-        return "string"
-
-
 def parse_python_function(
-    function_code: str, function_name: str, module_content: Optional[str] = None
+    function_code: str, function_name: str
 ) -> Tuple[str, Optional[Dict], Optional[Dict]]:
     """Parse Python function to extract metadata using AST only.
 
     Args:
         function_code: The function code
         function_name: The function name
-        module_content: The whole module the function lives in. When given and
-            the signature uses a ``Literal`` or a module-defined type (e.g. a
-            Pydantic model), params are derived from the annotations instead,
-            so nested structure is kept; see ``utils.annotation_schema``.
 
     Returns:
         Tuple of (description, params, returns)
@@ -229,7 +214,6 @@ def parse_python_function(
     # Extract docstring using AST
     docstring = ast.get_docstring(func_def)
     docstring_params: Dict[str, str] = {}
-    docstring_types: Dict[str, str] = {}
 
     if docstring:
         # Parse docstring for description and parameter descriptions
@@ -259,8 +243,6 @@ def parse_python_function(
                 if param_match:
                     param_name, param_type, param_desc = param_match.groups()
                     docstring_params[param_name] = param_desc.strip()
-                    if param_type:
-                        docstring_types[param_name] = param_type
             elif current_section == "returns" and line_stripped:
                 if not returns:
                     returns = {"type": "string", "description": ""}
@@ -275,11 +257,8 @@ def parse_python_function(
 
         param_name = arg.arg
 
-        # Get type from annotation; the docstring type fills in when there is none
-        if arg.annotation is None and param_name in docstring_types:
-            json_type = _docstring_type_to_json_type(docstring_types[param_name])
-        else:
-            json_type = _ast_annotation_to_json_type(arg.annotation)
+        # Get type from annotation
+        json_type = _ast_annotation_to_json_type(arg.annotation)
 
         # Get description from docstring if available
         param_desc = docstring_params.get(param_name, f"Parameter {param_name}")
@@ -319,15 +298,6 @@ def parse_python_function(
         }
         if required:
             params_result["required"] = required
-
-        if module_content is not None:
-            rich = derive_params_schema(
-                module_content,
-                function_name,
-                {name: prop["description"] for name, prop in params.items()},
-            )
-            if rich is not None:
-                params_result = rich
 
     return (description or f"Function {function_name}", params_result, returns)
 
@@ -566,7 +536,7 @@ def parse_code_file(
             func = functions[0]
             try:
                 description, params, returns = parse_python_function(
-                    func["code"], func["name"], module_content=content
+                    func["code"], func["name"]
                 )
             except (SyntaxError, ValueError) as e:
                 # If parsing individual function fails, try parsing the whole file
@@ -576,7 +546,7 @@ def parse_code_file(
                 logger.info(f"Attempting to parse entire file instead...")
                 try:
                     description, params, returns = parse_python_function(
-                        content, func["name"], module_content=content
+                        content, func["name"]
                     )
                 except Exception as e2:
                     logger.error(f"Failed to parse function '{func['name']}': {e2}")
@@ -608,7 +578,7 @@ def parse_code_file(
             for func in functions:
                 try:
                     description, params, returns = parse_python_function(
-                        func["code"], func["name"], module_content=content
+                        func["code"], func["name"]
                     )
                 except (SyntaxError, ValueError) as e:
                     # If parsing individual function fails, try parsing the whole file
@@ -618,7 +588,7 @@ def parse_code_file(
                     logger.info(f"Attempting to parse entire file instead...")
                     try:
                         description, params, returns = parse_python_function(
-                            content, func["name"], module_content=content
+                            content, func["name"]
                         )
                     except Exception as e2:
                         logger.error(f"Failed to parse function '{func['name']}': {e2}")

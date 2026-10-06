@@ -1,7 +1,9 @@
 """
-E2E: a tool whose parameters are Pydantic models / Literals keeps that structure
-from insert (``/tools/add`` and ``/skills/import-anthropic``) through the vMCP
-server's ``list_tools``, and its nested arguments reach the tool on a call.
+E2E: for a tool whose parameters are Pydantic models / Literals, the vMCP
+server's ``list_tools`` publishes the annotation-derived schema (nested
+structure, enums) while the stored tool params stay as before, for tools
+inserted via ``/tools/add`` and ``/skills/import-anthropic``; its nested
+arguments reach the tool on a call.
 """
 
 import asyncio
@@ -48,6 +50,22 @@ def _passenger_schema(prop):
     return next(s for s in prop["items"]["anyOf"] if s.get("title") == "Passenger")
 
 
+def _assert_flat(params):
+    """The stored params keep one type and a description per parameter."""
+    for prop in params["properties"].values():
+        assert set(prop) <= {"type", "description"}, prop
+
+
+async def _vmcp_tools(client, skill_uuid):
+    resp = await client.post(
+        f"{BASE_URL}/vmcp_servers/",
+        params={"name": VMCP_NAME, "description": "rich schema", "skill_uuid": skill_uuid},
+    )
+    assert resp.status_code == 200, resp.text
+    await asyncio.sleep(3)
+    return resp.json()["port"]
+
+
 def _assert_rich(params):
     props = params["properties"]
     assert props["cabin"]["enum"] == ["business", "economy", "basic_economy"]
@@ -70,20 +88,14 @@ async def test_rich_schema_from_tools_add_through_vmcp(run_sbs):
             tool_uuid = resp.json()["uuid"]
 
             stored = (await client.get(f"{BASE_URL}/tools/{TOOL_NAME}", params={"fields": "full"})).json()
-            _assert_rich(stored["params"])
+            _assert_flat(stored["params"])
 
             resp = await client.post(
                 f"{BASE_URL}/skills/",
                 params={"name": SKILL_NAME, "description": "rich schema", "tool_uuids": [tool_uuid]},
             )
             assert resp.status_code == 200, resp.text
-            resp = await client.post(
-                f"{BASE_URL}/vmcp_servers/",
-                params={"name": VMCP_NAME, "description": "rich schema", "skill_uuid": resp.json()["uuid"]},
-            )
-            assert resp.status_code == 200, resp.text
-            port = resp.json()["port"]
-            await asyncio.sleep(3)
+            port = await _vmcp_tools(client, resp.json()["uuid"])
 
             async with asyncio.timeout(30):
                 async with sse_client(f"http://127.0.0.1:{port}/sse") as (read, write):
@@ -131,8 +143,17 @@ async def test_rich_schema_from_anthropic_import(run_sbs):
             skill_name = resp.json()["skill_name"]
 
             stored = (await client.get(f"{BASE_URL}/tools/{TOOL_NAME}", params={"fields": "full"})).json()
-            _assert_rich(stored["params"])
+            _assert_flat(stored["params"])
+
+            port = await _vmcp_tools(client, resp.json()["skill_uuid"])
+            async with asyncio.timeout(30):
+                async with sse_client(f"http://127.0.0.1:{port}/sse") as (read, write):
+                    async with ClientSession(read, write) as session:
+                        await session.initialize()
+                        tools = {t.name: t for t in (await session.list_tools()).tools}
+                        _assert_rich(tools[TOOL_NAME].inputSchema)
         finally:
+            await client.delete(f"{BASE_URL}/vmcp_servers/{VMCP_NAME}")
             if skill_name:
                 await client.delete(f"{BASE_URL}/skills/{skill_name}")
             await client.delete(f"{BASE_URL}/tools/{TOOL_NAME}")
