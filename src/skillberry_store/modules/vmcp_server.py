@@ -10,6 +10,7 @@ from typing import Annotated, Any, Callable, List, Optional, Protocol
 
 from mcp.server.fastmcp import FastMCP
 from skillberry_store.modules.object_handler import get_object_handler
+from skillberry_store.utils.annotation_schema import derive_params_schema
 
 logger = logging.getLogger(__name__)
 
@@ -75,6 +76,10 @@ class ToolSource(Protocol):
     server needs* rather than as an ``ObjectHandler`` mirror: the server
     never reads module files or resolves dependencies itself, so execution
     strategy stays with whoever owns the content.
+
+    A source may also offer ``get_module(manifest) -> str``, the tool's module
+    source; the server then publishes a schema derived from the tool's Python
+    annotations (see ``VirtualMcpServer._rich_input_schema``).
     """
 
     def get_manifest(self, uuid: str) -> dict:
@@ -127,6 +132,11 @@ class _HandlerToolSource:
 
     def get_manifest(self, uuid: str) -> dict:
         return self.handler.read_dict(uuid)
+
+    def get_module(self, manifest: dict) -> str:
+        return self.handler.read_file(
+            manifest["uuid"], manifest["module_name"], raw_content=True
+        )
 
     async def execute(self, manifest: dict, parameters: dict, env_id: str) -> dict:
         from skillberry_store.modules.file_executor import FileExecutor
@@ -482,7 +492,7 @@ class VirtualMcpServer:
                                 inspect.Parameter(
                                     param_name,
                                     inspect.Parameter.POSITIONAL_OR_KEYWORD,
-                                    default=None,
+                                    default=param_info.get("default"),
                                     annotation=annotated_type,
                                 )
                             )
@@ -573,10 +583,68 @@ class VirtualMcpServer:
 
                 return handler
 
-            handler = make_handler(tool.name, tool.__dict__)
+            # The stored params are flat (one type per parameter); for a tool
+            # annotated with Pydantic models or Literals, build the handler from
+            # the annotation-derived schema so its arguments validate against it.
+            # A parameter defaulting to None (Optional[X]) is typed "any" in the
+            # handler so an explicit null is still accepted.
+            rich_schema = self._rich_input_schema(tool.name)
+            tool_schema = dict(tool.__dict__)
+            if rich_schema is not None:
+                tool_schema["inputSchema"] = {
+                    **rich_schema,
+                    "properties": {
+                        name: {**prop, "type": "any"}
+                        if "default" in prop and prop["default"] is None
+                        else prop
+                        for name, prop in rich_schema["properties"].items()
+                    },
+                }
+            handler = make_handler(tool.name, tool_schema)
 
             # Use FastMCP's add_tool method
             self.mcp.add_tool(handler, name=tool.name, description=tool.description)
+
+            # FastMCP publishes a schema built from the handler's flat signature,
+            # which drops nested structure (items, enum, object properties).
+            if rich_schema is not None:
+                registered = self.mcp._tool_manager.get_tool(tool.name)
+                if registered is not None:
+                    registered.parameters = rich_schema
+
+    def _rich_input_schema(self, tool_name: str) -> Optional[dict]:
+        """
+        Return the tool's JSON Schema derived from its Python annotations, or None.
+
+        Only Python code tools whose signature uses a ``Literal`` or a
+        module-defined type (e.g. a Pydantic model) get one, and only when the
+        tool source offers ``get_module``; parameter descriptions are taken
+        from the stored params. See ``utils.annotation_schema``.
+
+        Parameters:
+            tool_name (str): name of a tool listed by this server
+        """
+        manifest = self._tool_manifests.get(tool_name) or {}
+        if (
+            manifest.get("programming_language") != "python"
+            or manifest.get("packaging_format") == "mcp"
+        ):
+            return None
+        get_module = getattr(self.tool_source, "get_module", None)
+        if get_module is None:
+            return None
+        try:
+            source = get_module(manifest)
+        except Exception as e:
+            logging.warning(f"Could not read the module of tool '{tool_name}': {e}")
+            return None
+        stored = (manifest.get("params") or {}).get("properties") or {}
+        descriptions = {
+            name: prop.get("description")
+            for name, prop in stored.items()
+            if isinstance(prop, dict)
+        }
+        return derive_params_schema(source, tool_name, descriptions)
 
     def _register_prompts(self):
         """
