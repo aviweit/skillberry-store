@@ -11,6 +11,38 @@ class Synthesizer(Protocol):
         ...
 
 
+def to_oas30(node: Any) -> Any:
+    """Rewrite JSON Schema null types into the OpenAPI 3.0 ``nullable`` form.
+
+    Tool params are JSON Schema (pydantic emits ``Optional[X]`` as
+    ``anyOf: [X, {"type": "null"}]``), but OpenAPI 3.0 has no ``null`` type.
+    """
+    if isinstance(node, list):
+        return [to_oas30(x) for x in node]
+    if not isinstance(node, dict):
+        return node
+    out = {k: to_oas30(v) for k, v in node.items()}
+    for key in ("anyOf", "oneOf"):
+        options = out.get(key)
+        if not isinstance(options, list):
+            continue
+        rest = [o for o in options if o != {"type": "null"}]
+        if len(rest) == len(options):
+            continue
+        out["nullable"] = True
+        if len(rest) == 1 and isinstance(rest[0], dict):
+            del out[key]
+            out = {**rest[0], **out}
+        else:
+            out[key] = rest
+    if isinstance(out.get("type"), list):
+        types = [t for t in out["type"] if t != "null"]
+        if len(types) < len(out["type"]):
+            out["nullable"] = True
+        out["type"] = types[0] if types else "object"
+    return out
+
+
 class OpenApiSynthesizer:
     """Default synthesizer: input-schema-only fidelity (D7 enhancement deferred)."""
 
@@ -21,7 +53,7 @@ class OpenApiSynthesizer:
         for tool in tools:
             name = tool["name"]
             params = tool.get("params") or {"type": "object", "properties": {}}
-            request_schema = dict(params)
+            request_schema = to_oas30(dict(params))
             request_schema.setdefault("type", "object")
             paths[f"/{name}"] = {
                 "post": {

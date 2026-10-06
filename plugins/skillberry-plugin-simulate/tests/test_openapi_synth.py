@@ -1,4 +1,4 @@
-from skillberry_plugin_simulate.openapi_synth import OpenApiSynthesizer
+from skillberry_plugin_simulate.openapi_synth import OpenApiSynthesizer, to_oas30
 
 
 def _tool(name="get_weather"):
@@ -41,3 +41,41 @@ def test_tool_without_params_still_valid():
     assert op["operationId"] == "ping"
     schema = op["requestBody"]["content"]["application/json"]["schema"]
     assert schema["type"] == "object"
+
+
+def test_rich_params_null_types_become_nullable():
+    tool = {
+        "name": "book",
+        "params": {
+            "type": "object",
+            "properties": {
+                "cabin": {"type": "string", "enum": ["economy", "business"]},
+                "note": {"anyOf": [{"type": "string"}, {"type": "null"}], "default": None},
+                "flights": {
+                    "type": "array",
+                    "items": {
+                        "anyOf": [
+                            {"type": "object", "properties": {"date": {"type": "string"}}},
+                            {"type": "object", "additionalProperties": True},
+                        ]
+                    },
+                },
+            },
+            "required": ["cabin", "flights"],
+        },
+    }
+    spec = OpenApiSynthesizer().synthesize([tool], title="s")
+    props = spec["paths"]["/book"]["post"]["requestBody"]["content"]["application/json"]["schema"]["properties"]
+    assert props["note"] == {"type": "string", "nullable": True, "default": None}
+    assert props["cabin"]["enum"] == ["economy", "business"]
+    assert len(props["flights"]["items"]["anyOf"]) == 2
+
+
+def test_to_oas30_handles_multi_option_and_list_types():
+    assert to_oas30({"anyOf": [{"type": "string"}, {"type": "integer"}, {"type": "null"}]}) == {
+        "anyOf": [{"type": "string"}, {"type": "integer"}],
+        "nullable": True,
+    }
+    assert to_oas30({"type": ["string", "null"]}) == {"type": "string", "nullable": True}
+    flat = {"type": "object", "properties": {"city": {"type": "string"}}}
+    assert to_oas30(flat) == flat

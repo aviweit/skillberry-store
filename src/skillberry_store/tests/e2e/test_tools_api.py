@@ -255,9 +255,10 @@ async def test_add_tool_from_python_endpoint(run_sbs):
         assert result.get("module_name") == "add_via_tools_add.py"
         assert result.get("uuid") is not None
         assert result.get("description") == "Add two integers."
+        # The docstring gives no types, so the annotations supply them.
         assert result.get("parameters") == {
-            "x": {"type": "string", "description": "First number"},
-            "y": {"type": "string", "description": "Second number"},
+            "x": {"type": "int", "description": "First number"},
+            "y": {"type": "int", "description": "Second number"},
         }
 
         get_response = await client.get(f"{BASE_URL}/tools/add_via_tools_add?fields=full")
