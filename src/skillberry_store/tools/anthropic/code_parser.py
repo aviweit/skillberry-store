@@ -290,14 +290,14 @@ def parse_python_function(
         else:
             returns["type"] = return_json_type
 
-    params_result = None
-    if params:
-        params_result = {
-            "type": "object",
-            "properties": params,
-        }
-        if required:
-            params_result["required"] = required
+    # A function without parameters still gets an (empty) object schema: a tool
+    # stored with no params is skipped by the vMCP server when it lists tools.
+    params_result = {
+        "type": "object",
+        "properties": params,
+    }
+    if required:
+        params_result["required"] = required
 
     return (description or f"Function {function_name}", params_result, returns)
 
@@ -339,12 +339,11 @@ def parse_bash_function(
             "description": f"Argument {num}",
         }
 
-    params_result = None
-    if params:
-        params_result = {
-            "type": "object",
-            "properties": params,
-        }
+    # Empty object schema when there are no parameters (see parse_python_function).
+    params_result = {
+        "type": "object",
+        "properties": params,
+    }
 
     return (
         description or f"Function {function_name}",

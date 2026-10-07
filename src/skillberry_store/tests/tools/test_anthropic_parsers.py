@@ -236,6 +236,15 @@ greet_user() {
         assert returns is not None
         assert returns['type'] == 'string'
     
+    def test_function_without_parameters_gets_empty_object_schema(self):
+        """A no-parameter tool must still be stored with params, or the vMCP skips it."""
+        _, params, _ = parse_python_function(
+            'def answer():\n    """Return the answer."""\n    return 42\n', "answer"
+        )
+        assert params == {"type": "object", "properties": {}}
+        _, params, _ = parse_bash_function("# Print the date\nnow() {\n    date\n}\n", "now")
+        assert params == {"type": "object", "properties": {}}
+
     def test_parse_code_file_python(self):
         """Test parsing Python code file."""
         code = """
